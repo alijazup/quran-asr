@@ -17,8 +17,10 @@ jobs:
         uses: replicate/setup-cog@v2
         with:
           token_can_push: true
-        env:
-          REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+          replicate_api_token: ${{ secrets.REPLICATE_API_TOKEN }}
+
+      - name: Log in to Replicate Registry
+        run: echo "${{ secrets.REPLICATE_API_TOKEN }}" | docker login r8.im -u alijazup --password-stdin
 
       - name: Push to Replicate
         run: cog push r8.im/alijazup/quran-asr
