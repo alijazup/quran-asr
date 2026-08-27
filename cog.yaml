@@ -4,14 +4,12 @@
   system_packages:
     - "ffmpeg"
     - "libsndfile1"
-    - "build-essential"
   python_version: "3.10"
-  run:
-    - "pip install --upgrade pip setuptools wheel Cython"
   python_packages:
     - "torch==2.3.1"
     - "torchaudio==2.3.1"
-    - "nemo_toolkit[asr]==1.23.0"
+    - "onnxruntime-gpu==1.17.0"
+    - "sentencepiece==0.2.0"
     - "soundfile==0.12.1"
     - "numpy==1.26.4"
     - "huggingface_hub>=0.23.0"
