@@ -1,0 +1,24 @@
+name: Push to Replicate
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  push_to_replicate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Cog
+        uses: replicate/setup-cog@v2
+        with:
+          token_can_push: true
+        env:
+          REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+
+      - name: Push to Replicate
+        run: cog push r8.im/alijazup/quran-asr
