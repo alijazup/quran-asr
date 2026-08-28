@@ -13,6 +13,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download Model Weights
+        run: |
+          mkdir -p weights
+          python3 -m pip install huggingface_hub
+          python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='NightPrince/stt-ar-fastconformer-quran-minshawi', filename='quran_minshawi_final.nemo', local_dir='weights')"
+          ls -lh weights/
+
       - name: Setup Cog
         uses: replicate/setup-cog@v2
         with:
