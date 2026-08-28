@@ -73,7 +73,7 @@ class Predictor(BasePredictor):
                 pass
 
         self.model.eval()
-        print("FastConformer Quran ASR model fully initialized and ready.", flush=True)
+        print("FastConformer Quran ASR model fully initialized and ready on GPU.", flush=True)
 
     def predict(
         self,
@@ -99,22 +99,46 @@ class Predictor(BasePredictor):
         data, samplerate = sf.read(wav_path)
         duration = len(data) / float(samplerate)
 
-        # Step 2: Transcribe with FastConformer
-        raw_res = self.model.transcribe(paths2audio_files=[wav_path], return_hypotheses=False)
+        # Step 2: Transcribe with FastConformer with return_hypotheses=True
+        raw_res = self.model.transcribe(paths2audio_files=[wav_path], return_hypotheses=True)
+        
         text = ""
-        if isinstance(raw_res, list) and len(raw_res) > 0:
-            first = raw_res[0]
-            if isinstance(first, str):
-                text = first
-            elif hasattr(first, "text"):
-                text = str(first.text)
-            else:
-                text = str(first)
+        # Extract text from Hybrid tuple (RNNT, CTC) or List
+        candidates = []
+        if isinstance(raw_res, tuple):
+            for part in raw_res:
+                if isinstance(part, list):
+                    candidates.extend(part)
+                else:
+                    candidates.append(part)
+        elif isinstance(raw_res, list):
+            candidates = raw_res
         else:
-            text = str(raw_res)
+            candidates = [raw_res]
+
+        for item in reversed(candidates):  # CTC is typically second
+            if hasattr(item, "text") and item.text and str(item.text).strip():
+                t = str(item.text).strip()
+                if t and t not in ["['  ']", "['']", "''", ""]:
+                    text = t
+                    break
+            elif isinstance(item, str) and item.strip():
+                t = item.strip()
+                if t and t not in ["['  ']", "['']", "''", ""]:
+                    text = t
+                    break
+            elif hasattr(item, "y_sequence") and self.sp_proc is not None:
+                ids = item.y_sequence
+                if hasattr(ids, "tolist"):
+                    ids = ids.tolist()
+                clean_ids = [int(x) for x in ids if int(x) > 0 and int(x) < len(self.sp_proc)]
+                if clean_ids:
+                    text = self.sp_proc.decode(clean_ids).strip()
+                    if text:
+                        break
 
         # Clean text
-        text = text.replace("⁇", "").replace("?", "").strip()
+        text = text.replace("⁇", "").replace("?", "").replace("['", "").replace("']", "").strip()
         print(f"Decoded Arabic text: {text}", flush=True)
 
         raw_words = [w for w in text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
