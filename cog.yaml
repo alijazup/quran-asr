@@ -1,16 +1,17 @@
 image: "r8.im/alijazup/quran-asr"
 build:
   gpu: true
-  cuda: "12.1"
+  cuda: "11.8"
   system_packages:
     - "ffmpeg"
   python_version: "3.10"
   python_packages:
-    - "torch"
-    - "torchaudio"
     - "transformers"
     - "accelerate"
     - "faster-whisper"
     - "soundfile"
-    - "numpy"
+    - "numpy<2.0.0"
+  run:
+    - "pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu118"
+    - "python3 -c \"from faster_whisper import WhisperModel; WhisperModel('tarteel-ai/whisper-base-ar-quran', download_root='/src/weights/tarteel-whisper', compute_type='float16')\" && chmod -R 777 /src/weights"
 predict: "predict.py:Predictor"
