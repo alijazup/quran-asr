@@ -3,24 +3,31 @@ import subprocess
 import os
 import json
 import torch
-from faster_whisper import WhisperModel
+import nemo.collections.asr as nemo_asr
+from huggingface_hub import hf_hub_download
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load official faster-whisper large-v3-turbo model with CTranslate2 GPU acceleration"""
-        print("Loading faster-whisper large-v3-turbo model...")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-        self.model = WhisperModel(
-            "large-v3-turbo",
-            device=device,
-            compute_type=compute_type
+        """Load NVIDIA FastConformer-Quran ASR model (WER 0.0038)"""
+        print("Loading FastConformer-Quran model...")
+        model_path = hf_hub_download(
+            repo_id="mohammed/fastconformer-quran-ar",
+            filename="phase1_top3/phase1_top3_wer0.0038.nemo"
         )
-        print(f"faster-whisper large-v3-turbo ready on {device} ({compute_type}).")
+        try:
+            self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(restore_path=model_path)
+            self.model.change_decoding_strategy(decoder_type="ctc")
+        except Exception:
+            self.model = nemo_asr.models.EncDecCTCModelBPE.restore_from(restore_path=model_path)
+
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+        self.model.eval()
+        print("FastConformer-Quran model successfully loaded on GPU.")
 
     def predict(
         self,
-        audio: Path = Input(description="Input audio file (WAV, MP3, MP4, etc.)"),
+        audio: Path = Input(description="Input Quran recitation audio file"),
         min_silence_gap: float = Input(
             description="Minimum pause in seconds to split into a new subtitle segment",
             default=0.35
@@ -30,79 +37,45 @@ class Predictor(BasePredictor):
             default=6
         )
     ) -> str:
-        # Step 1: Convert input audio to 16kHz mono WAV
-        wav_path = "/tmp/audio_16k.wav"
+        # Step 1: Strictly convert audio to 16kHz mono WAV (fixes ??? bug)
+        clean_wav = "/tmp/quran_16k.wav"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(audio),
-            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
+            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", clean_wav
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with faster-whisper large-v3-turbo
-        segments_gen, info = self.model.transcribe(
-            wav_path,
-            language="ar",
-            word_timestamps=True,
-            initial_prompt="بسم الله الرحمن الرحيم. سورة من القرآن الكريم.",
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=250,
-                speech_pad_ms=200
-            ),
-            temperature=0.0
-        )
+        # Step 2: Transcribe with FastConformer-Quran
+        with torch.no_grad():
+            hypotheses = self.model.transcribe([clean_wav], batch_size=1)
 
-        words = []
-        raw_segments = []
-
-        for seg in segments_gen:
-            if seg.words:
-                for w in seg.words:
-                    clean_w = w.word.strip()
-                    if clean_w:
-                        words.append({
-                            "word": clean_w,
-                            "start": round(w.start, 3),
-                            "end": round(w.end, 3)
-                        })
-            raw_segments.append({
-                "start": round(seg.start, 3),
-                "end": round(seg.end, 3),
-                "arabic_snippet": seg.text.strip()
-            })
-
-        print(f"Transcribed {len(words)} words across {len(raw_segments)} raw segments.")
-
-        # Step 3: Re-segment words into subtitle-friendly chunks
-        final_segments = []
-        if words:
-            current_words = []
-            for i, w in enumerate(words):
-                current_words.append(w)
-                gap_to_next = (words[i + 1]["start"] - w["end"]) if (i + 1 < len(words)) else 999.0
-                word_count = len(current_words)
-                should_split = (
-                    (gap_to_next >= min_silence_gap and word_count >= 2) or
-                    (word_count >= max_words_per_segment) or
-                    (i == len(words) - 1)
-                )
-                if should_split and current_words:
-                    final_segments.append({
-                        "start": round(current_words[0]["start"], 3),
-                        "end": round(current_words[-1]["end"], 3),
-                        "arabic_snippet": " ".join([item["word"] for item in current_words])
-                    })
-                    current_words = []
-        else:
-            final_segments = raw_segments
-
-        if os.path.exists(wav_path):
+        if os.path.exists(clean_wav):
             try:
-                os.remove(wav_path)
+                os.remove(clean_wav)
             except Exception:
                 pass
 
+        if not hypotheses or len(hypotheses) == 0:
+            return json.dumps({"raw_text": "", "segments": []}, ensure_ascii=False)
+
+        raw_hypothesis = hypotheses[0]
+        if hasattr(raw_hypothesis, 'text'):
+            arabic_text = raw_hypothesis.text
+        else:
+            arabic_text = str(raw_hypothesis)
+
+        arabic_text = (arabic_text or "").strip()
+        words_list = arabic_text.split()
+
+        # Step 3: Format subtitle segments
+        segments = []
+        for i in range(0, len(words_list), max_words_per_segment):
+            chunk = words_list[i:i + max_words_per_segment]
+            segments.append({
+                "arabic_snippet": " ".join(chunk)
+            })
+
         return json.dumps({
-            "words": words,
-            "segments": final_segments,
+            "raw_text": arabic_text,
+            "segments": segments,
             "status": "success"
         }, ensure_ascii=False)

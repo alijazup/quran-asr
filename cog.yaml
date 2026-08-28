@@ -4,11 +4,13 @@ build:
   cuda: "11.8"
   system_packages:
     - "ffmpeg"
+    - "libsndfile1"
   python_version: "3.10"
   python_packages:
-    - "transformers"
-    - "accelerate"
-    - "faster-whisper"
+    - "torch>=2.0.0"
+    - "torchaudio>=2.0.0"
+    - "nemo_toolkit[asr]>=1.20.0"
     - "soundfile"
-    - "numpy"
+    - "librosa"
+    - "huggingface_hub"
 predict: "predict.py:Predictor"
