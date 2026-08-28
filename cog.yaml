@@ -1,18 +1,18 @@
 image: "r8.im/alijazup/quran-asr"
 build:
-  gpu: false
+  gpu: true
+  cuda: "11.8"
   system_packages:
     - "ffmpeg"
     - "libsndfile1"
-    - "curl"
+    - "build-essential"
+    - "python3-dev"
   python_version: "3.10"
-  python_packages:
-    - "torch>=2.0.0"
-    - "torchaudio>=2.0.0"
-    - "nemo_toolkit[asr]>=1.20.0"
-    - "soundfile"
-    - "librosa"
-    - "huggingface_hub"
   run:
-    - "mkdir -p /src/weights && curl -L -o /src/weights/fastconformer-quran.nemo https://huggingface.co/mohammed/fastconformer-quran-ar/resolve/main/phase1_top3/phase1_top3_wer0.0038.nemo"
+    - "pip install --no-cache-dir Cython wheel setuptools"
+    - "pip install --no-cache-dir 'numpy<2.0.0'"
+    - "pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu118"
+    - "pip install --no-cache-dir nemo_toolkit[asr] soundfile sentencepiece 'huggingface_hub==0.23.5'"
+    - "pip install --no-cache-dir 'pydantic==1.10.13' 'fastapi==0.98.0' 'wandb<0.16.0' 'numpy<2.0.0' 'huggingface_hub==0.23.5'"
+    - "mkdir -p /src/weights && python3 -c \"from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='NightPrince/stt-ar-fastconformer-quran-minshawi', filename='quran_minshawi_final.nemo', local_dir='/src/weights')\" && chmod -R 777 /src/weights"
 predict: "predict.py:Predictor"
