@@ -5,6 +5,7 @@ build:
   system_packages:
     - "ffmpeg"
     - "libsndfile1"
+    - "curl"
   python_version: "3.10"
   python_packages:
     - "torch>=2.0.0"
@@ -13,4 +14,6 @@ build:
     - "soundfile"
     - "librosa"
     - "huggingface_hub"
+  run:
+    - "mkdir -p /src/weights && curl -L -o /src/weights/fastconformer-quran.nemo https://huggingface.co/mohammed/fastconformer-quran-ar/resolve/main/phase1_top3/phase1_top3_wer0.0038.nemo"
 predict: "predict.py:Predictor"
