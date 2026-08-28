@@ -9,7 +9,7 @@ import sentencepiece as spm
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load FastConformer Quran model with TDT compatibility patch and SentencePiece decoding"""
+        """Load FastConformer model and initialize direct PyTorch CTC decoder"""
         print("Applying NeMo TDT compatibility patch...", flush=True)
         try:
             import nemo.collections.asr.parts.utils.asr_confidence_utils as asr_confidence_utils
@@ -23,18 +23,18 @@ class Predictor(BasePredictor):
             print("Warning on ConfidenceConfig:", e, flush=True)
 
         import nemo.collections.asr as nemo_asr
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         weights_path = "/src/weights/quran_minshawi_final.nemo"
         if not os.path.exists(weights_path):
             weights_path = "weights/quran_minshawi_final.nemo"
 
-        # Extract tokenizer directly from archive
+        # 1. Extract SentencePiece tokenizer model directly from archive
         self.tok_path = "/src/weights/extracted_tok.model"
         if os.path.exists(weights_path) and not os.path.exists(self.tok_path):
             try:
                 with tarfile.open(weights_path, "r:*") as tar:
                     for m in tar.getmembers():
-                        if m.name.endswith(".model") or "tokenizer.model" in m.name:
+                        if m.name.endswith(".model") or "tokenizer" in m.name:
                             f = tar.extractfile(m)
                             if f is not None:
                                 with open(self.tok_path, "wb") as out_f:
@@ -44,36 +44,19 @@ class Predictor(BasePredictor):
             except Exception as e:
                 print("Tar extraction warning:", e, flush=True)
 
-        self.sp_proc = None
-        if os.path.exists(self.tok_path):
-            try:
-                self.sp_proc = spm.SentencePieceProcessor()
-                self.sp_proc.Load(self.tok_path)
-                print(f"SentencePieceProcessor loaded successfully with {len(self.sp_proc)} tokens.", flush=True)
-            except Exception as e:
-                print("SentencePiece load warning:", e, flush=True)
+        # 2. Load standalone SentencePiece processor
+        self.sp_proc = spm.SentencePieceProcessor()
+        self.sp_proc.Load(self.tok_path)
+        print(f"SentencePieceProcessor loaded successfully with {len(self.sp_proc)} tokens.", flush=True)
 
-        print(f"Restoring FastConformer model on {device}...", flush=True)
-        try:
-            self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(
-                restore_path=weights_path,
-                map_location=device
-            )
-            self.model.change_decoding_strategy(decoder_type="ctc")
-        except Exception:
-            self.model = nemo_asr.models.ASRModel.restore_from(
-                restore_path=weights_path,
-                map_location=device
-            )
-
-        if self.sp_proc is not None and hasattr(self.model, "tokenizer"):
-            try:
-                self.model.tokenizer.tokenizer = self.sp_proc
-            except Exception:
-                pass
-
+        # 3. Restore NeMo model on device
+        print(f"Restoring FastConformer model on {self.device}...", flush=True)
+        self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(
+            restore_path=weights_path,
+            map_location=self.device
+        )
         self.model.eval()
-        print("FastConformer Quran ASR model fully initialized and ready on GPU.", flush=True)
+        print("FastConformer Quran ASR model and direct CTC head ready on GPU.", flush=True)
 
     def predict(
         self,
@@ -89,7 +72,7 @@ class Predictor(BasePredictor):
     ) -> str:
         import soundfile as sf
 
-        # Step 1: Strictly convert input audio to 16kHz mono WAV
+        # Convert to 16kHz mono WAV
         wav_path = "/tmp/audio_16k.wav"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(audio),
@@ -97,72 +80,86 @@ class Predictor(BasePredictor):
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         data, samplerate = sf.read(wav_path)
-        duration = len(data) / float(samplerate)
+        total_duration = len(data) / float(samplerate)
 
-        # Step 2: Transcribe with FastConformer with return_hypotheses=True
-        raw_res = self.model.transcribe(paths2audio_files=[wav_path], return_hypotheses=True)
-        
-        text = ""
-        # Extract text from Hybrid tuple (RNNT, CTC) or List
-        candidates = []
-        if isinstance(raw_res, tuple):
-            for part in raw_res:
-                if isinstance(part, list):
-                    candidates.extend(part)
-                else:
-                    candidates.append(part)
-        elif isinstance(raw_res, list):
-            candidates = raw_res
-        else:
-            candidates = [raw_res]
+        # Chunk audio into <= 25-second windows for optimal acoustic encoding
+        chunk_duration = 25.0
+        chunk_samples = int(chunk_duration * samplerate)
+        all_words = []
+        full_text_chunks = []
+        num_chunks = max(1, int(np.ceil(len(data) / chunk_samples)))
 
-        for item in reversed(candidates):  # CTC is typically second
-            if hasattr(item, "text") and item.text and str(item.text).strip():
-                t = str(item.text).strip()
-                if t and t not in ["['  ']", "['']", "''", ""]:
-                    text = t
-                    break
-            elif isinstance(item, str) and item.strip():
-                t = item.strip()
-                if t and t not in ["['  ']", "['']", "''", ""]:
-                    text = t
-                    break
-            elif hasattr(item, "y_sequence") and self.sp_proc is not None:
-                ids = item.y_sequence
-                if hasattr(ids, "tolist"):
-                    ids = ids.tolist()
-                clean_ids = [int(x) for x in ids if int(x) > 0 and int(x) < len(self.sp_proc)]
-                if clean_ids:
-                    text = self.sp_proc.decode(clean_ids).strip()
-                    if text:
-                        break
+        blank_id = len(self.sp_proc)
 
-        # Clean text
-        text = text.replace("⁇", "").replace("?", "").replace("['", "").replace("']", "").strip()
-        print(f"Decoded Arabic text: {text}", flush=True)
+        for c_idx in range(num_chunks):
+            c_start_sample = c_idx * chunk_samples
+            c_end_sample = min((c_idx + 1) * chunk_samples, len(data))
+            chunk_data = data[c_start_sample:c_end_sample]
+            if len(chunk_data) == 0:
+                continue
 
-        raw_words = [w for w in text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
+            chunk_start_time = c_start_sample / float(samplerate)
+            chunk_dur = len(chunk_data) / float(samplerate)
 
-        words = []
-        if raw_words:
-            step = duration / max(1, len(raw_words))
-            for i, w in enumerate(raw_words):
-                words.append({
-                    "word": w,
-                    "start": round(i * step, 3),
-                    "end": round((i + 1) * step, 3)
-                })
+            # Direct PyTorch Forward Pass through Preprocessor -> Conformer Encoder -> CTC Head
+            audio_tensor = torch.tensor(chunk_data, dtype=torch.float32).unsqueeze(0).to(self.device)
+            audio_len = torch.tensor([len(chunk_data)], dtype=torch.long).to(self.device)
 
+            with torch.no_grad():
+                processed_signal, processed_signal_length = self.model.preprocessor(
+                    input_signal=audio_tensor, length=audio_len
+                )
+                encoded, encoded_len = self.model.encoder(
+                    audio_signal=processed_signal, length=processed_signal_length
+                )
+                log_probs = self.model.ctc_decoder(encoder_output=encoded)
+                preds = torch.argmax(log_probs, dim=-1)[0].cpu().numpy()
+
+            # CTC Greedy Collapse & Decode
+            collapsed_ids = []
+            prev = None
+            for p in preds:
+                p_int = int(p)
+                if p_int != prev:
+                    if p_int != blank_id and p_int != 0 and p_int < len(self.sp_proc):
+                        collapsed_ids.append(p_int)
+                    prev = p_int
+
+            chunk_text = self.sp_proc.decode(collapsed_ids).strip()
+            chunk_text = chunk_text.replace("⁇", "").replace("?", "").strip()
+            print(f"Decoded Chunk {c_idx+1}/{num_chunks}: {chunk_text}", flush=True)
+
+            if chunk_text:
+                full_text_chunks.append(chunk_text)
+
+            chunk_words = [w for w in chunk_text.split() if w]
+
+            if chunk_words:
+                step = chunk_dur / max(1, len(chunk_words))
+                for w_i, w in enumerate(chunk_words):
+                    all_words.append({
+                        "word": w,
+                        "start": round(chunk_start_time + w_i * step, 3),
+                        "end": round(chunk_start_time + (w_i + 1) * step, 3)
+                    })
+
+        if os.path.exists(wav_path):
+            try:
+                os.remove(wav_path)
+            except Exception:
+                pass
+
+        # Build subtitle segments
         segments = []
         current_words = []
-        for i, w in enumerate(words):
+        for i, w in enumerate(all_words):
             current_words.append(w)
-            gap_to_next = (words[i + 1]["start"] - w["end"]) if (i + 1 < len(words)) else 999.0
+            gap_to_next = (all_words[i + 1]["start"] - w["end"]) if (i + 1 < len(all_words)) else 999.0
             word_count = len(current_words)
             should_split = (
                 (gap_to_next >= min_silence_gap and word_count >= 2) or
                 (word_count >= max_words_per_segment) or
-                (i == len(words) - 1)
+                (i == len(all_words) - 1)
             )
             if should_split and current_words:
                 segments.append({
@@ -172,15 +169,10 @@ class Predictor(BasePredictor):
                 })
                 current_words = []
 
-        if os.path.exists(wav_path):
-            try:
-                os.remove(wav_path)
-            except Exception:
-                pass
-
+        full_raw_text = " ".join(full_text_chunks)
         return json.dumps({
-            "raw_text": text,
-            "words": words,
+            "raw_text": full_raw_text,
+            "words": all_words,
             "segments": segments,
             "status": "success"
         }, ensure_ascii=False)
