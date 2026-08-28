@@ -13,5 +13,5 @@ build:
     - "numpy"
     - "torch"
   run:
-    - "python3 -c \"from faster_whisper import WhisperModel; WhisperModel('tarteel-ai/whisper-base-ar-quran', download_root='/src/weights')\""
+    - "python3 -c \"from faster_whisper import WhisperModel; WhisperModel('OdyAsh/faster-whisper-base-ar-quran', download_root='/src/weights')\""
 predict: "predict.py:Predictor"
