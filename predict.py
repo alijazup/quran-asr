@@ -1,6 +1,31 @@
+import os
+
+# Guarantee CUDA 12 and cuDNN dynamic libraries are loaded into LD_LIBRARY_PATH
+try:
+    import nvidia.cublas.lib
+    import nvidia.cudnn.lib
+    cublas_dir = os.path.dirname(nvidia.cublas.lib.__file__)
+    cudnn_dir = os.path.dirname(nvidia.cudnn.lib.__file__)
+    current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = f"{cublas_dir}:{cudnn_dir}:{current_ld}"
+    import ctypes
+    for f in os.listdir(cublas_dir):
+        if f.endswith(".so.12") or f.endswith(".so"):
+            try:
+                ctypes.CDLL(os.path.join(cublas_dir, f))
+            except Exception:
+                pass
+    for f in os.listdir(cudnn_dir):
+        if f.endswith(".so.9") or f.endswith(".so.8") or f.endswith(".so"):
+            try:
+                ctypes.CDLL(os.path.join(cudnn_dir, f))
+            except Exception:
+                pass
+except Exception:
+    pass
+
 from cog import BasePredictor, Input, Path
 import subprocess
-import os
 import json
 import torch
 from faster_whisper import WhisperModel
