@@ -6,7 +6,19 @@ import torch
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked FastConformer model instantly from local repository directory"""
+        """Load pre-baked FastConformer model instantly with TDT compatibility patch"""
+        print("Applying NeMo TDT compatibility patch...")
+        try:
+            import nemo.collections.asr.parts.utils.asr_confidence_utils as asr_confidence_utils
+            orig_init = asr_confidence_utils.ConfidenceConfig.__init__
+            def safe_init(self, *args, **kwargs):
+                kwargs.pop('tdt_include_duration', None)
+                orig_init(self, *args, **kwargs)
+            asr_confidence_utils.ConfidenceConfig.__init__ = safe_init
+            print("ConfidenceConfig patched successfully.")
+        except Exception as e:
+            print("Warning: could not patch ConfidenceConfig:", e)
+
         print("Loading FastConformer Quran ASR model from local image...")
         import nemo.collections.asr as nemo_asr
 
