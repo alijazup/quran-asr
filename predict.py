@@ -8,7 +8,7 @@ from huggingface_hub import hf_hub_download
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Download and load FastConformer Quran ONNX model once during startup"""
+        """Download and load FastConformer Quran Streaming ONNX model once during startup"""
         print("Downloading FastConformer Quran ONNX files from HuggingFace...")
         repo_id = "mohammed/fastconformer-quran-ar-onnx-int8"
         encoder_path = hf_hub_download(repo_id=repo_id, filename="encoder.int8.onnx")
@@ -16,8 +16,8 @@ class Predictor(BasePredictor):
         joiner_path = hf_hub_download(repo_id=repo_id, filename="joiner.int8.onnx")
         tokens_path = hf_hub_download(repo_id=repo_id, filename="tokens.txt")
 
-        print("Initializing sherpa-onnx FastConformer OfflineRecognizer on CPU...")
-        self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+        print("Initializing sherpa-onnx FastConformer OnlineRecognizer on CPU...")
+        self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
             encoder=encoder_path,
             decoder=decoder_path,
             joiner=joiner_path,
@@ -50,12 +50,16 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 2. Transcribe with sherpa-onnx
+        # 2. Transcribe with sherpa-onnx OnlineRecognizer
         samples, sample_rate = sf.read(wav_path, dtype="float32")
         stream = self.recognizer.create_stream()
         stream.accept_waveform(sample_rate=16000, waveform=samples)
-        self.recognizer.decode_stream(stream)
-        result = stream.result
+        
+        # Feed chunks through streaming recognizer
+        while self.recognizer.is_ready(stream):
+            self.recognizer.decode_stream(stream)
+            
+        result = self.recognizer.get_result(stream)
 
         # Extract words & timestamps
         words = []
