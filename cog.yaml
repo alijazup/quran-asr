@@ -1,6 +1,5 @@
 ﻿build:
-  gpu: true
-  cuda: "12.1"
+  gpu: false
   system_packages:
     - "ffmpeg"
     - "libsndfile1"
