@@ -10,7 +10,9 @@ class Predictor(BasePredictor):
         print("Loading FastConformer Quran ASR model from local image...")
         import nemo.collections.asr as nemo_asr
 
-        weights_path = "weights/quran_minshawi_final.nemo"
+        weights_path = "/src/weights/quran_minshawi_final.nemo"
+        if not os.path.exists(weights_path):
+            weights_path = "weights/quran_minshawi_final.nemo"
         if not os.path.exists(weights_path):
             from huggingface_hub import hf_hub_download
             weights_path = hf_hub_download(
