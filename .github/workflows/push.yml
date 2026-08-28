@@ -23,4 +23,4 @@ jobs:
         run: echo "${{ secrets.REPLICATE_API_TOKEN }}" | docker login r8.im -u alijazup --password-stdin
 
       - name: Push to Replicate
-        run: cog push r8.im/alijazup/tarteel-asr
+        run: cog push r8.im/alijazup/quran-asr

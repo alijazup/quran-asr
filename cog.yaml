@@ -1,4 +1,4 @@
-image: "r8.im/alijazup/tarteel-asr"
+image: "r8.im/alijazup/quran-asr"
 build:
   gpu: true
   cuda: "11.8"
