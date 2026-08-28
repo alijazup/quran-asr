@@ -56,7 +56,7 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        audio: Path = Input(description="Input audio file (WAV, MP3, MP4, etc.)"),
+        audio: Path = Input(description="Input audio file (WAV, MP3, MP4, MOV, etc.)"),
         min_silence_gap: float = Input(
             description="Minimum pause in seconds to split into a new subtitle segment",
             default=0.45
@@ -83,8 +83,7 @@ class Predictor(BasePredictor):
                 min_silence_duration_ms=250,
                 speech_pad_ms=200
             ),
-            temperature=0.0,
-            initial_prompt="بسم الله الرحمن الرحيم. سورة من القرآن الكريم."
+            temperature=0.0
         )
 
         words = []
