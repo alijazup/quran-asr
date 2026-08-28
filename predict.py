@@ -9,7 +9,7 @@ import sentencepiece as spm
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load FastConformer model and explicitly bind extracted SentencePiece tokenizer"""
+        """Load FastConformer model and initialize direct PyTorch CTC decoder"""
         print("Applying NeMo TDT compatibility patch...")
         try:
             import nemo.collections.asr.parts.utils.asr_confidence_utils as asr_confidence_utils
@@ -23,7 +23,7 @@ class Predictor(BasePredictor):
             print("Warning: could not patch ConfidenceConfig:", e)
 
         import nemo.collections.asr as nemo_asr
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         weights_path = "/src/weights/quran_minshawi_final.nemo"
 
         # 1. Extract SentencePiece tokenizer model directly from archive
@@ -32,7 +32,7 @@ class Predictor(BasePredictor):
             try:
                 with tarfile.open(weights_path, "r:*") as tar:
                     for m in tar.getmembers():
-                        if m.name.endswith(".model") or "tokenizer.model" in m.name:
+                        if m.name.endswith(".model") or "tokenizer" in m.name:
                             f = tar.extractfile(m)
                             if f is not None:
                                 with open(self.tok_path, "wb") as out_f:
@@ -42,33 +42,19 @@ class Predictor(BasePredictor):
             except Exception as e:
                 print("Tar extraction warning:", e)
 
-        # 2. Load standalone SentencePiece processor for guaranteed decoding
-        self.sp_proc = None
-        if os.path.exists(self.tok_path):
-            try:
-                self.sp_proc = spm.SentencePieceProcessor()
-                self.sp_proc.Load(self.tok_path)
-                print(f"SentencePieceProcessor loaded successfully with {len(self.sp_proc)} tokens.")
-            except Exception as e:
-                print("SentencePiece load warning:", e)
+        # 2. Load standalone SentencePiece processor
+        self.sp_proc = spm.SentencePieceProcessor()
+        self.sp_proc.Load(self.tok_path)
+        print(f"SentencePieceProcessor loaded successfully with {len(self.sp_proc)} tokens.")
 
-        # 3. Restore NeMo model
-        print(f"Restoring FastConformer model on {device}...")
-        self.model = nemo_asr.models.ASRModel.restore_from(
+        # 3. Restore NeMo model on device
+        print(f"Restoring FastConformer model on {self.device}...")
+        self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(
             restore_path=weights_path,
-            map_location=device
+            map_location=self.device
         )
         self.model.eval()
-
-        # 4. Attach extracted tokenizer to NeMo model internals
-        if self.sp_proc is not None and hasattr(self.model, "tokenizer"):
-            try:
-                self.model.tokenizer.tokenizer = self.sp_proc
-                print("Bound SentencePieceProcessor to model.tokenizer.tokenizer.")
-            except Exception as e:
-                print("Tokenizer binding warning:", e)
-
-        print("FastConformer Quran ASR model fully initialized and ready.")
+        print("FastConformer Quran ASR model and CTC head ready.")
 
     def predict(
         self,
@@ -94,11 +80,13 @@ class Predictor(BasePredictor):
         data, samplerate = sf.read(wav_path)
         total_duration = len(data) / float(samplerate)
 
-        # Chunk audio into <= 25-second windows
+        # Chunk audio into <= 25-second windows for optimal acoustic encoding
         chunk_duration = 25.0
         chunk_samples = int(chunk_duration * samplerate)
         all_words = []
         num_chunks = max(1, int(np.ceil(len(data) / chunk_samples)))
+
+        blank_id = len(self.sp_proc)
 
         for c_idx in range(num_chunks):
             c_start_sample = c_idx * chunk_samples
@@ -107,46 +95,37 @@ class Predictor(BasePredictor):
             if len(chunk_data) == 0:
                 continue
 
-            chunk_wav_path = f"/tmp/chunk_{c_idx}.wav"
-            sf.write(chunk_wav_path, chunk_data, samplerate)
-
             chunk_start_time = c_start_sample / float(samplerate)
             chunk_dur = len(chunk_data) / float(samplerate)
 
-            # Transcribe with return_hypotheses=True to get raw token IDs
-            hypotheses = self.model.transcribe(paths2audio_files=[chunk_wav_path], return_hypotheses=True)
-            
-            chunk_text = ""
-            if hypotheses and len(hypotheses) > 0:
-                hyp = hypotheses[0]
-                if isinstance(hyp, (list, tuple)) and len(hyp) > 0:
-                    hyp = hyp[0]
+            # Direct PyTorch Forward Pass through Preprocessor -> Conformer Encoder -> CTC Head
+            audio_tensor = torch.tensor(chunk_data, dtype=torch.float32).unsqueeze(0).to(self.device)
+            audio_len = torch.tensor([len(chunk_data)], dtype=torch.long).to(self.device)
 
-                # Attempt 1: Direct SentencePiece decoding from y_sequence or token ids
-                if self.sp_proc is not None:
-                    ids = None
-                    if hasattr(hyp, "y_sequence") and hyp.y_sequence is not None:
-                        ids = hyp.y_sequence
-                        if hasattr(ids, "tolist"):
-                            ids = ids.tolist()
-                    elif hasattr(hyp, "tokens") and hyp.tokens is not None:
-                        ids = hyp.tokens
-                        if hasattr(ids, "tolist"):
-                            ids = ids.tolist()
+            with torch.no_grad():
+                processed_signal, processed_signal_length = self.model.preprocessor(
+                    input_signal=audio_tensor, length=audio_len
+                )
+                encoded, encoded_len = self.model.encoder(
+                    audio_signal=processed_signal, length=processed_signal_length
+                )
+                log_probs = self.model.ctc_decoder(encoder_output=encoded)
+                preds = torch.argmax(log_probs, dim=-1)[0].cpu().numpy()
 
-                    if ids:
-                        clean_ids = [int(x) for x in ids if int(x) > 0 and int(x) < len(self.sp_proc)]
-                        chunk_text = self.sp_proc.decode(clean_ids)
+            # CTC Greedy Collapse & Decode
+            collapsed_ids = []
+            prev = None
+            for p in preds:
+                p_int = int(p)
+                if p_int != prev:
+                    if p_int != blank_id and p_int != 0 and p_int < len(self.sp_proc):
+                        collapsed_ids.append(p_int)
+                    prev = p_int
 
-                # Attempt 2: Fallback to hyp.text
-                if not chunk_text and hasattr(hyp, "text") and hyp.text:
-                    chunk_text = str(hyp.text)
-
-            # Final text cleanup
-            chunk_text = chunk_text.replace("⁇", "").replace("['", "").replace("']", "").strip()
+            chunk_text = self.sp_proc.decode(collapsed_ids).strip()
             print(f"Decoded Chunk {c_idx+1}/{num_chunks}: {chunk_text}")
 
-            chunk_words = [w for w in chunk_text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
+            chunk_words = [w for w in chunk_text.split() if w]
 
             if chunk_words:
                 step = chunk_dur / max(1, len(chunk_words))
@@ -157,8 +136,8 @@ class Predictor(BasePredictor):
                         "end": round(chunk_start_time + (w_i + 1) * step, 3)
                     })
 
-            if os.path.exists(chunk_wav_path):
-                os.remove(chunk_wav_path)
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
 
         # Build subtitle segments
         segments = []
@@ -179,8 +158,5 @@ class Predictor(BasePredictor):
                     "arabic_snippet": " ".join([item["word"] for item in current_words])
                 })
                 current_words = []
-
-        if os.path.exists(wav_path):
-            os.remove(wav_path)
 
         return json.dumps({"words": all_words, "segments": segments}, ensure_ascii=False)
