@@ -7,20 +7,14 @@ from faster_whisper import WhisperModel
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked Tarteel AI Quran Whisper model instantly from local image weights"""
-        print("Loading pre-baked Tarteel AI Quran Whisper model...")
+        """Load Tarteel AI Quran Whisper model with CTranslate2 GPU acceleration"""
+        print("Loading Tarteel AI Quran Whisper model...")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
-        
-        model_path = "/src/weights/tarteel-whisper"
-        if not os.path.exists(model_path):
-            model_path = "tarteel-ai/whisper-base-ar-quran"
-
         self.model = WhisperModel(
-            model_path,
+            "tarteel-ai/whisper-base-ar-quran",
             device=device,
-            compute_type=compute_type,
-            download_root="/src/weights/tarteel-whisper"
+            compute_type=compute_type
         )
         print(f"Tarteel AI Quran Whisper model ready on {device} ({compute_type}).")
 

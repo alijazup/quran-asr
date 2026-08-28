@@ -10,8 +10,5 @@ build:
     - "accelerate"
     - "faster-whisper"
     - "soundfile"
-    - "numpy<2.0.0"
-  run:
-    - "pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu118"
-    - "python3 -c \"from faster_whisper import WhisperModel; WhisperModel('tarteel-ai/whisper-base-ar-quran', download_root='/src/weights/tarteel-whisper', compute_type='float16')\" && chmod -R 777 /src/weights"
+    - "numpy"
 predict: "predict.py:Predictor"
