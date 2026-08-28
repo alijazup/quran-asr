@@ -64,10 +64,23 @@ class Predictor(BasePredictor):
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Transcribe using in-memory model
-        hypotheses = self.model.transcribe(paths2audio_files=[wav_path], return_hypotheses=True)
-        hyp = hypotheses[0]
-        text = hyp.text if hasattr(hyp, "text") else str(hyp)
-        raw_words = text.split()
+        raw_res = self.model.transcribe(paths2audio_files=[wav_path], return_hypotheses=False)
+        text = ""
+        if isinstance(raw_res, list) and len(raw_res) > 0:
+            first = raw_res[0]
+            if isinstance(first, str):
+                text = first
+            elif hasattr(first, "text"):
+                text = str(first.text)
+            elif isinstance(first, list) and len(first) > 0 and hasattr(first[0], "text"):
+                text = str(first[0].text)
+            else:
+                text = str(first)
+        else:
+            text = str(raw_res)
+
+        # Filter and clean Arabic words
+        raw_words = [w for w in text.strip().split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
 
         # Duration & timestamps
         data, samplerate = sf.read(wav_path)
