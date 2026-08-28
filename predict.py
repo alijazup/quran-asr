@@ -7,8 +7,8 @@ from faster_whisper import WhisperModel
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked faster-whisper large-v3-turbo model with GPU acceleration"""
-        print("Loading faster-whisper model on GPU...", flush=True)
+        """Load Tarteel AI Quran Whisper model with CTranslate2 GPU acceleration and pre-baked weights"""
+        print("Loading Tarteel AI Quran Whisper model on GPU...", flush=True)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
         weights_path = "/src/weights"
@@ -16,12 +16,12 @@ class Predictor(BasePredictor):
             weights_path = "weights"
 
         self.model = WhisperModel(
-            "large-v3-turbo",
+            "tarteel-ai/whisper-base-ar-quran",
             device=device,
             compute_type=compute_type,
             download_root=weights_path if os.path.exists(weights_path) else None
         )
-        print(f"Faster-Whisper model ready on {device} ({compute_type}).", flush=True)
+        print(f"Tarteel AI Quran Whisper model ready on {device} ({compute_type}).", flush=True)
 
     def predict(
         self,
@@ -35,14 +35,14 @@ class Predictor(BasePredictor):
             default=6
         )
     ) -> str:
-        # 1. Resample to 16kHz mono WAV
+        # Step 1: Resample input audio to 16kHz mono WAV
         wav_path = "/tmp/audio_16k.wav"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(audio),
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 2. Transcribe with word-level timestamps and VAD filter
+        # Step 2: Transcribe with Tarteel Quran Whisper model using Silero VAD and word-level timestamps
         segments_gen, _ = self.model.transcribe(
             wav_path,
             language="ar",
@@ -52,8 +52,7 @@ class Predictor(BasePredictor):
                 min_silence_duration_ms=250,
                 speech_pad_ms=200
             ),
-            temperature=0.0,
-            initial_prompt="بسم الله الرحمن الرحيم. سورة من القرآن الكريم."
+            temperature=0.0
         )
 
         words = []
@@ -79,7 +78,9 @@ class Predictor(BasePredictor):
                 "arabic_snippet": seg_text
             })
 
-        # 3. Subtitle segmentation based on timing gaps and word count
+        print(f"Transcribed {len(words)} words across {len(raw_segments)} raw segments.", flush=True)
+
+        # Step 3: Re-segment words into subtitle-friendly chunks
         final_segments = []
         if words:
             current_words = []
