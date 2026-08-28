@@ -4,31 +4,38 @@ import soundfile as sf
 import json
 import subprocess
 import os
+import zipfile
 from huggingface_hub import hf_hub_download
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Download and load FastConformer Quran Streaming ONNX model once during startup"""
-        print("Downloading FastConformer Quran ONNX files from HuggingFace...")
-        repo_id = "mohammed/fastconformer-quran-ar-onnx-int8"
-        encoder_path = hf_hub_download(repo_id=repo_id, filename="encoder.int8.onnx")
-        decoder_path = hf_hub_download(repo_id=repo_id, filename="decoder.int8.onnx")
-        joiner_path = hf_hub_download(repo_id=repo_id, filename="joiner.int8.onnx")
-        tokens_path = hf_hub_download(repo_id=repo_id, filename="tokens.txt")
+        """Download and load FastConformer Quran CTC ONNX model once during startup"""
+        print("Downloading FastConformer Quran CTC ONNX from HuggingFace...")
+        zip_path = hf_hub_download(
+            repo_id="Na3Na33/fastconformer-quran-coreml",
+            filename="FastConformerQuranCTC.onnx.zip"
+        )
+        extract_dir = "/tmp/fastconformer_ctc"
+        os.makedirs(extract_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
 
-        print("Initializing sherpa-onnx FastConformer OnlineRecognizer on CPU...")
-        self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
-            encoder=encoder_path,
-            decoder=decoder_path,
-            joiner=joiner_path,
+        model_path = os.path.join(extract_dir, "FastConformerQuranCTC.onnx")
+        tokens_path = hf_hub_download(
+            repo_id="mohammed/fastconformer-quran-ar-onnx-int8",
+            filename="tokens.txt"
+        )
+
+        print("Initializing sherpa-onnx NeMo FastConformer CTC Recognizer on CPU...")
+        self.recognizer = sherpa_onnx.OfflineRecognizer.from_nemo_ctc(
+            model=model_path,
             tokens=tokens_path,
             num_threads=4,
             sample_rate=16000,
             feature_dim=80,
-            model_type="fastconformer",
             provider="cpu"
         )
-        print("FastConformer Quran ASR ready.")
+        print("FastConformer Quran CTC ASR ready.")
 
     def predict(
         self,
@@ -50,16 +57,12 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 2. Transcribe with sherpa-onnx OnlineRecognizer
+        # 2. Transcribe with sherpa-onnx OfflineRecognizer
         samples, sample_rate = sf.read(wav_path, dtype="float32")
         stream = self.recognizer.create_stream()
         stream.accept_waveform(sample_rate=16000, waveform=samples)
-        
-        # Feed chunks through streaming recognizer
-        while self.recognizer.is_ready(stream):
-            self.recognizer.decode_stream(stream)
-            
-        result = self.recognizer.get_result(stream)
+        self.recognizer.decode_stream(stream)
+        result = stream.result
 
         # Extract words & timestamps
         words = []
