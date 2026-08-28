@@ -7,8 +7,8 @@ from faster_whisper import WhisperModel
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked Tarteel Quran Whisper model directly from local disk with ZERO network requests"""
-        print("Loading Tarteel AI Quran Whisper model from local disk on GPU...", flush=True)
+        """Load pre-baked faster-whisper large-v3-turbo model from local disk with zero network requests"""
+        print("Loading faster-whisper large-v3-turbo from local disk on GPU...", flush=True)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
         
@@ -16,10 +16,10 @@ class Predictor(BasePredictor):
         if not os.path.exists(model_path):
             model_path = "weights/model"
         if not os.path.exists(model_path):
-            model_path = "OdyAsh/faster-whisper-base-ar-quran"
+            model_path = "large-v3-turbo"
 
         is_local = os.path.exists(model_path) and os.path.isdir(model_path)
-        print(f"Loading model from {'LOCAL DISK ' + model_path if is_local else model_path} on {device} ({compute_type})...", flush=True)
+        print(f"Loading WhisperModel from {'LOCAL DISK ' + model_path if is_local else model_path} on {device} ({compute_type})...", flush=True)
 
         self.model = WhisperModel(
             model_path,
@@ -27,7 +27,7 @@ class Predictor(BasePredictor):
             compute_type=compute_type,
             local_files_only=is_local
         )
-        print(f"Tarteel AI Quran Whisper model loaded successfully and ready on {device}.", flush=True)
+        print(f"Faster-Whisper Large-V3-Turbo loaded successfully and ready on {device}.", flush=True)
 
     def predict(
         self,
@@ -48,7 +48,7 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with Tarteel Quran Whisper model using Silero VAD and word-level timestamps
+        # Step 2: Transcribe with Faster-Whisper Large-V3-Turbo using Silero VAD and word-level timestamps
         segments_gen, _ = self.model.transcribe(
             wav_path,
             language="ar",
@@ -58,7 +58,8 @@ class Predictor(BasePredictor):
                 min_silence_duration_ms=250,
                 speech_pad_ms=200
             ),
-            temperature=0.0
+            temperature=0.0,
+            initial_prompt="بسم الله الرحمن الرحيم. سورة من القرآن الكريم."
         )
 
         words = []

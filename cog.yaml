@@ -14,5 +14,5 @@ build:
     - "torch"
     - "huggingface_hub"
   run:
-    - "mkdir -p /src/weights/model && python3 -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='OdyAsh/faster-whisper-base-ar-quran', local_dir='/src/weights/model')\""
+    - "mkdir -p /src/weights/model && python3 -c \"from faster_whisper import download_model; download_model('large-v3-turbo', output_dir='/src/weights/model')\""
 predict: "predict.py:Predictor"
