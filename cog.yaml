@@ -10,6 +10,6 @@
     - "pip install --no-cache-dir Cython wheel setuptools"
     - "pip install --no-cache-dir 'numpy<2.0.0'"
     - "pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu"
-    - "pip install --no-cache-dir nemo_toolkit[asr]==1.23.0 soundfile 'huggingface_hub==0.23.5'"
+    - "pip install --no-cache-dir nemo_toolkit[asr] soundfile 'huggingface_hub==0.23.5'"
     - "pip install --no-cache-dir 'pydantic==1.10.13' 'fastapi==0.98.0' 'wandb<0.16.0' 'numpy<2.0.0' 'huggingface_hub==0.23.5'"
 predict: "predict.py:Predictor"

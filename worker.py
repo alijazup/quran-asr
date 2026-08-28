@@ -23,7 +23,7 @@ try:
         filename="quran_minshawi_final.nemo"
     )
 
-    model = nemo_asr.models.ASRModel.restore_from(restore_path=nemo_model_path, map_location="cpu")
+    model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(restore_path=nemo_model_path, map_location="cpu")
     model.eval()
 
     hypotheses = model.transcribe(paths2audio_files=[wav_path], return_hypotheses=True)
