@@ -2,10 +2,8 @@
 import json
 import os
 import subprocess
-import soundfile as sf
-from huggingface_hub import hf_hub_download
 
-def main():
+try:
     audio_path = sys.argv[1]
     min_silence_gap = float(sys.argv[2]) if len(sys.argv) > 2 else 0.45
     max_words_per_segment = int(sys.argv[3]) if len(sys.argv) > 3 else 6
@@ -17,16 +15,17 @@ def main():
     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     import nemo.collections.asr as nemo_asr
+    from huggingface_hub import hf_hub_download
+    import soundfile as sf
     
     nemo_model_path = hf_hub_download(
         repo_id="NightPrince/stt-ar-fastconformer-quran-minshawi",
         filename="quran_minshawi_final.nemo"
     )
 
-    model = nemo_asr.models.EncDecCTCModelBPE.restore_from(restore_path=nemo_model_path, map_location="cpu")
+    model = nemo_asr.models.ASRModel.restore_from(restore_path=nemo_model_path, map_location="cpu")
     model.eval()
 
-    # Transcribe audio file
     hypotheses = model.transcribe(paths2audio_files=[wav_path], return_hypotheses=True)
     hyp = hypotheses[0]
     
@@ -36,7 +35,6 @@ def main():
     data, samplerate = sf.read(wav_path)
     duration = len(data) / float(samplerate)
 
-    # Word-level timing estimation based on CTC alignment/duration
     words = []
     if raw_words:
         step = duration / max(1, len(raw_words))
@@ -47,7 +45,6 @@ def main():
                 "end": round((i + 1) * step, 3)
             })
 
-    # Group into subtitle segments
     segments = []
     current_words = []
     for i, w in enumerate(words):
@@ -75,5 +72,7 @@ def main():
         "segments": segments
     }, ensure_ascii=False))
 
-if __name__ == "__main__":
-    main()
+except Exception as e:
+    import traceback
+    sys.stderr.write(f"ERROR: {str(e)}\n{traceback.format_exc()}\n")
+    sys.exit(1)
