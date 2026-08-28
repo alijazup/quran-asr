@@ -9,7 +9,7 @@ import sentencepiece as spm
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load FastConformer model and initialize direct PyTorch CTC decoder"""
+        """Load FastConformer model in full FP32 precision to prevent any NaN float overflow"""
         print("Applying NeMo TDT compatibility patch...")
         try:
             import nemo.collections.asr.parts.utils.asr_confidence_utils as asr_confidence_utils
@@ -47,14 +47,16 @@ class Predictor(BasePredictor):
         self.sp_proc.Load(self.tok_path)
         print(f"SentencePieceProcessor loaded successfully with {len(self.sp_proc)} tokens.")
 
-        # 3. Restore NeMo model on device
-        print(f"Restoring FastConformer model on {self.device}...")
-        self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(
+        # 3. Restore NeMo model in float32 precision
+        print(f"Restoring FastConformer model on {self.device} (FP32)...")
+        self.model = nemo_asr.models.ASRModel.restore_from(
             restore_path=weights_path,
             map_location=self.device
         )
+        self.model = self.model.to(self.device).float()
         self.model.eval()
-        print("FastConformer Quran ASR model and CTC head ready.")
+
+        print("FastConformer Quran ASR model ready (FP32 mode).")
 
     def predict(
         self,
@@ -80,13 +82,11 @@ class Predictor(BasePredictor):
         data, samplerate = sf.read(wav_path)
         total_duration = len(data) / float(samplerate)
 
-        # Chunk audio into <= 25-second windows for optimal acoustic encoding
+        # Chunk audio into <= 25-second windows
         chunk_duration = 25.0
         chunk_samples = int(chunk_duration * samplerate)
         all_words = []
         num_chunks = max(1, int(np.ceil(len(data) / chunk_samples)))
-
-        blank_id = len(self.sp_proc)
 
         for c_idx in range(num_chunks):
             c_start_sample = c_idx * chunk_samples
@@ -95,37 +95,29 @@ class Predictor(BasePredictor):
             if len(chunk_data) == 0:
                 continue
 
+            chunk_wav_path = f"/tmp/chunk_{c_idx}.wav"
+            sf.write(chunk_wav_path, chunk_data, samplerate)
+
             chunk_start_time = c_start_sample / float(samplerate)
             chunk_dur = len(chunk_data) / float(samplerate)
 
-            # Direct PyTorch Forward Pass through Preprocessor -> Conformer Encoder -> CTC Head
-            audio_tensor = torch.tensor(chunk_data, dtype=torch.float32).unsqueeze(0).to(self.device)
-            audio_len = torch.tensor([len(chunk_data)], dtype=torch.long).to(self.device)
+            with torch.inference_mode():
+                # Transcribe with batch_size=1 in FP32
+                raw_res = self.model.transcribe(paths2audio_files=[chunk_wav_path], batch_size=1, return_hypotheses=False)
 
-            with torch.no_grad():
-                processed_signal, processed_signal_length = self.model.preprocessor(
-                    input_signal=audio_tensor, length=audio_len
-                )
-                encoded, encoded_len = self.model.encoder(
-                    audio_signal=processed_signal, length=processed_signal_length
-                )
-                log_probs = self.model.ctc_decoder(encoder_output=encoded)
-                preds = torch.argmax(log_probs, dim=-1)[0].cpu().numpy()
+            chunk_text = ""
+            if isinstance(raw_res, (list, tuple)) and len(raw_res) > 0:
+                first = raw_res[0]
+                if isinstance(first, (list, tuple)) and len(first) > 0:
+                    chunk_text = str(first[0])
+                else:
+                    chunk_text = str(first)
+            else:
+                chunk_text = str(raw_res)
 
-            # CTC Greedy Collapse & Decode
-            collapsed_ids = []
-            prev = None
-            for p in preds:
-                p_int = int(p)
-                if p_int != prev:
-                    if p_int != blank_id and p_int != 0 and p_int < len(self.sp_proc):
-                        collapsed_ids.append(p_int)
-                    prev = p_int
+            print(f"Chunk {c_idx+1}/{num_chunks} raw text: {chunk_text}")
 
-            chunk_text = self.sp_proc.decode(collapsed_ids).strip()
-            print(f"Decoded Chunk {c_idx+1}/{num_chunks}: {chunk_text}")
-
-            chunk_words = [w for w in chunk_text.split() if w]
+            chunk_words = [w for w in chunk_text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis") and w != "⁇"]
 
             if chunk_words:
                 step = chunk_dur / max(1, len(chunk_words))
@@ -135,6 +127,9 @@ class Predictor(BasePredictor):
                         "start": round(chunk_start_time + w_i * step, 3),
                         "end": round(chunk_start_time + (w_i + 1) * step, 3)
                     })
+
+            if os.path.exists(chunk_wav_path):
+                os.remove(chunk_wav_path)
 
         if os.path.exists(wav_path):
             os.remove(wav_path)
