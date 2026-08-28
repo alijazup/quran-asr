@@ -16,13 +16,16 @@ class Predictor(BasePredictor):
         joiner_path = hf_hub_download(repo_id=repo_id, filename="joiner.int8.onnx")
         tokens_path = hf_hub_download(repo_id=repo_id, filename="tokens.txt")
 
-        print("Initializing sherpa-onnx OfflineRecognizer on CPU...")
+        print("Initializing sherpa-onnx FastConformer OfflineRecognizer on CPU...")
         self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
             encoder=encoder_path,
             decoder=decoder_path,
             joiner=joiner_path,
             tokens=tokens_path,
             num_threads=4,
+            sample_rate=16000,
+            feature_dim=80,
+            model_type="fastconformer",
             provider="cpu"
         )
         print("FastConformer Quran ASR ready.")
