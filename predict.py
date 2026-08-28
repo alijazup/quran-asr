@@ -4,24 +4,31 @@ import os
 import json
 import torch
 
+MODEL_PATH = "/root/model/quran_minshawi_final.nemo"
+
 class Predictor(BasePredictor):
     def setup(self):
-        """Load FastConformer model into CPU memory once at container startup"""
-        print("Loading FastConformer Quran ASR model on CPU...")
+        """Load pre-baked FastConformer model instantly from local disk"""
+        print("Loading FastConformer Quran ASR model from local image...")
         import nemo.collections.asr as nemo_asr
-        from huggingface_hub import hf_hub_download
+        
+        path = MODEL_PATH if os.path.exists(MODEL_PATH) else "quran_minshawi_final.nemo"
+        if not os.path.exists(path):
+            from huggingface_hub import hf_hub_download
+            path = hf_hub_download(
+                repo_id="NightPrince/stt-ar-fastconformer-quran-minshawi",
+                filename="quran_minshawi_final.nemo"
+            )
 
-        nemo_model_path = hf_hub_download(
-            repo_id="NightPrince/stt-ar-fastconformer-quran-minshawi",
-            filename="quran_minshawi_final.nemo"
-        )
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Loading checkpoint on {device} from {path}...")
 
         self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(
-            restore_path=nemo_model_path,
-            map_location="cpu"
+            restore_path=path,
+            map_location=device
         )
         self.model.eval()
-        print("FastConformer model ready on CPU.")
+        print("FastConformer model ready.")
 
     def predict(
         self,
