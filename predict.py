@@ -6,7 +6,7 @@ import torch
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked FastConformer model instantly with TDT compatibility patch"""
+        """Load pre-baked FastConformer model instantly with TDT compatibility patch and CTC decoding"""
         print("Applying NeMo TDT compatibility patch...")
         try:
             import nemo.collections.asr.parts.utils.asr_confidence_utils as asr_confidence_utils
@@ -40,6 +40,14 @@ class Predictor(BasePredictor):
             map_location=device
         )
         self.model.eval()
+
+        # Switch hybrid model to CTC decoding (which has the fine-tuned Quran weights)
+        try:
+            self.model.change_decoding_strategy(decoder_type="ctc")
+            print("Switched decoding strategy to CTC.")
+        except Exception as e:
+            print("Note on decoding strategy:", e)
+
         print("FastConformer model ready.")
 
     def predict(
@@ -78,6 +86,8 @@ class Predictor(BasePredictor):
                 text = str(first)
         else:
             text = str(raw_res)
+
+        print(f"Decoded Arabic text: {text}")
 
         # Filter and clean Arabic words
         raw_words = [w for w in text.strip().split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
