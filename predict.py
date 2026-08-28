@@ -89,7 +89,8 @@ class Predictor(BasePredictor):
         full_text_chunks = []
         num_chunks = max(1, int(np.ceil(len(data) / chunk_samples)))
 
-        blank_id = len(self.sp_proc)
+        vocab_size = len(self.sp_proc)
+        blank_id = vocab_size
 
         for c_idx in range(num_chunks):
             c_start_sample = c_idx * chunk_samples
@@ -113,7 +114,14 @@ class Predictor(BasePredictor):
                     audio_signal=processed_signal, length=processed_signal_length
                 )
                 log_probs = self.model.ctc_decoder(encoder_output=encoded)
-                preds = torch.argmax(log_probs, dim=-1)[0].cpu().numpy()
+                
+                # Check log_probs shape: [Batch, Vocab, Time] vs [Batch, Time, Vocab]
+                if log_probs.shape[1] == vocab_size or log_probs.shape[1] == vocab_size + 1:
+                    preds = torch.argmax(log_probs, dim=1)[0].cpu().numpy()
+                else:
+                    preds = torch.argmax(log_probs, dim=-1)[0].cpu().numpy()
+
+            print(f"DEBUG: Chunk {c_idx+1} log_probs shape: {log_probs.shape}, preds: {preds[:15]}", flush=True)
 
             # CTC Greedy Collapse & Decode
             collapsed_ids = []
@@ -121,7 +129,7 @@ class Predictor(BasePredictor):
             for p in preds:
                 p_int = int(p)
                 if p_int != prev:
-                    if p_int != blank_id and p_int != 0 and p_int < len(self.sp_proc):
+                    if p_int != blank_id and p_int != 0 and p_int < vocab_size:
                         collapsed_ids.append(p_int)
                     prev = p_int
 
