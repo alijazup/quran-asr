@@ -6,7 +6,7 @@
     - "libsndfile1"
   python_version: "3.10"
   python_packages:
-    - "sherpa-onnx==1.10.37"
+    - "sherpa-onnx"
     - "soundfile==0.12.1"
     - "numpy==1.26.4"
     - "huggingface_hub>=0.23.0"
