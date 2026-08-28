@@ -7,7 +7,7 @@ import numpy as np
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked FastConformer model instantly with TDT compatibility patch and CTC decoding"""
+        """Load FastConformer model via native ASRModel.from_pretrained with TDT patch"""
         print("Applying NeMo TDT compatibility patch...")
         try:
             import nemo.collections.asr.parts.utils.asr_confidence_utils as asr_confidence_utils
@@ -20,39 +20,27 @@ class Predictor(BasePredictor):
         except Exception as e:
             print("Warning: could not patch ConfidenceConfig:", e)
 
-        print("Loading FastConformer Quran ASR model from local image...")
         import nemo.collections.asr as nemo_asr
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Loading NightPrince/stt-ar-fastconformer-quran-minshawi on {device}...")
 
         weights_path = "/src/weights/quran_minshawi_final.nemo"
-        if not os.path.exists(weights_path):
-            weights_path = "weights/quran_minshawi_final.nemo"
-        if not os.path.exists(weights_path):
-            from huggingface_hub import hf_hub_download
-            weights_path = hf_hub_download(
-                repo_id="NightPrince/stt-ar-fastconformer-quran-minshawi",
-                filename="quran_minshawi_final.nemo"
+        if os.path.exists(weights_path):
+            self.model = nemo_asr.models.ASRModel.restore_from(
+                restore_path=weights_path,
+                map_location=device
             )
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Loading checkpoint on {device} from {weights_path}...")
-
-        self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(
-            restore_path=weights_path,
-            map_location=device
-        )
+        else:
+            self.model = nemo_asr.models.ASRModel.from_pretrained(
+                "NightPrince/stt-ar-fastconformer-quran-minshawi",
+                map_location=device
+            )
         self.model.eval()
-
-        try:
-            self.model.change_decoding_strategy(decoder_type="ctc")
-            print("Switched decoding strategy to CTC.")
-        except Exception as e:
-            print("Note on decoding strategy:", e)
-
         print("FastConformer model ready.")
 
     def predict(
         self,
-        audio: Path = Input(description="Input audio file (WAV, MP3, MP4, M4A, etc.)"),
+        audio: Path = Input(description="Input audio file (WAV, MP3, MP4,钩 etc.)"),
         min_silence_gap: float = Input(
             description="Minimum pause in seconds to split into a new subtitle segment",
             default=0.45
@@ -93,32 +81,23 @@ class Predictor(BasePredictor):
             chunk_start_time = c_start_sample / float(samplerate)
             chunk_dur = len(chunk_data) / float(samplerate)
 
-            raw_res = self.model.transcribe(paths2audio_files=[chunk_wav_path], return_hypotheses=False)
+            raw_res = self.model.transcribe(paths2audio_files=[chunk_wav_path])
 
             chunk_text = ""
-            if isinstance(raw_res, tuple):
-                # Hybrid model returns (rnnt_list, ctc_list) -> use CTC output (index 1)
-                ctc_part = raw_res[1] if len(raw_res) > 1 else raw_res[0]
-                if isinstance(ctc_part, list) and len(ctc_part) > 0:
-                    chunk_text = ctc_part[0] if isinstance(ctc_part[0], str) else str(getattr(ctc_part[0], 'text', ctc_part[0]))
+            if isinstance(raw_res, (list, tuple)) and len(raw_res) > 0:
+                item = raw_res[0]
+                if isinstance(item, (list, tuple)) and len(item) > 0:
+                    chunk_text = str(getattr(item[0], 'text', item[0]))
+                elif hasattr(item, 'text'):
+                    chunk_text = str(item.text)
                 else:
-                    chunk_text = str(ctc_part)
-            elif isinstance(raw_res, list) and len(raw_res) > 0:
-                first = raw_res[0]
-                if isinstance(first, str):
-                    chunk_text = first
-                elif hasattr(first, "text"):
-                    chunk_text = str(first.text)
-                else:
-                    chunk_text = str(first)
+                    chunk_text = str(item)
             else:
                 chunk_text = str(raw_res)
 
-            # Clean unknown tokens and special chars
-            chunk_text = chunk_text.replace("⁇", "").replace("['", "").replace("']", "").strip()
-            chunk_words = [w for w in chunk_text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
+            print(f"Raw chunk {c_idx+1}/{num_chunks} text: {chunk_text}")
 
-            print(f"Chunk {c_idx+1}/{num_chunks} text: {chunk_text}")
+            chunk_words = [w for w in chunk_text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis") and w != "⁇"]
 
             if chunk_words:
                 step = chunk_dur / max(1, len(chunk_words))
