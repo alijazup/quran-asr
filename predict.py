@@ -6,8 +6,8 @@ import torch
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load FastConformer model into GPU memory at startup"""
-        print("Loading FastConformer Quran ASR model...")
+        """Load FastConformer model into CPU memory once at container startup"""
+        print("Loading FastConformer Quran ASR model on CPU...")
         import nemo.collections.asr as nemo_asr
         from huggingface_hub import hf_hub_download
 
@@ -16,15 +16,12 @@ class Predictor(BasePredictor):
             filename="quran_minshawi_final.nemo"
         )
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Loading model on device: {device}")
-
         self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(
             restore_path=nemo_model_path,
-            map_location=device
+            map_location="cpu"
         )
         self.model.eval()
-        print("Model loaded and ready.")
+        print("FastConformer model ready on CPU.")
 
     def predict(
         self,
@@ -39,7 +36,6 @@ class Predictor(BasePredictor):
         )
     ) -> str:
         import soundfile as sf
-        import tempfile
 
         # Convert to 16kHz mono WAV
         wav_path = "/tmp/audio_16k.wav"
@@ -48,13 +44,13 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Transcribe
+        # Transcribe using in-memory model
         hypotheses = self.model.transcribe(paths2audio_files=[wav_path], return_hypotheses=True)
         hyp = hypotheses[0]
         text = hyp.text if hasattr(hyp, "text") else str(hyp)
         raw_words = text.split()
 
-        # Get duration for rough timestamps
+        # Duration & timestamps
         data, samplerate = sf.read(wav_path)
         duration = len(data) / float(samplerate)
 
@@ -68,7 +64,6 @@ class Predictor(BasePredictor):
                     "end": round((i + 1) * step, 3)
                 })
 
-        # Build segments
         segments = []
         current_words = []
         for i, w in enumerate(words):
