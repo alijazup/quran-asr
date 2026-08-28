@@ -1,6 +1,6 @@
 ﻿from cog import BasePredictor, Input, Path
-import nemo.collections.asr as nemo_asr
-import torch
+import sherpa_onnx
+import soundfile as sf
 import json
 import subprocess
 import os
@@ -8,17 +8,23 @@ from huggingface_hub import hf_hub_download
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Download and load FastConformer Quran ASR model once during startup"""
-        print("Downloading Quran FastConformer checkpoint from HuggingFace...")
-        model_path = hf_hub_download(
-            repo_id="mohammed/fastconformer-quran-ar",
-            filename="phase3_full_finetune/phase3_full_finetune_wer0.0852.nemo"
+        """Download and load FastConformer Quran ONNX model once during startup"""
+        print("Downloading FastConformer Quran ONNX files from HuggingFace...")
+        repo_id = "mohammed/fastconformer-quran-ar-onnx-int8"
+        encoder_path = hf_hub_download(repo_id=repo_id, filename="encoder.int8.onnx")
+        decoder_path = hf_hub_download(repo_id=repo_id, filename="decoder.int8.onnx")
+        joiner_path = hf_hub_download(repo_id=repo_id, filename="joiner.int8.onnx")
+        tokens_path = hf_hub_download(repo_id=repo_id, filename="tokens.txt")
+
+        print("Initializing sherpa-onnx OfflineRecognizer...")
+        self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=encoder_path,
+            decoder=decoder_path,
+            joiner=joiner_path,
+            tokens=tokens_path,
+            num_threads=2,
+            provider="cuda" if sherpa_onnx.is_cuda_available() else "cpu"
         )
-        print("Restoring NeMo FastConformer model...")
-        self.model = nemo_asr.models.EncDecCTCModelBPE.restore_from(model_path)
-        if torch.cuda.is_available():
-            self.model = self.model.cuda()
-        self.model.eval()
         print("FastConformer Quran ASR ready.")
 
     def predict(
@@ -33,7 +39,6 @@ class Predictor(BasePredictor):
             default=6
         )
     ) -> str:
-        """Transcribe recitation audio and return word timestamps and formatted subtitle segments"""
         wav_path = "/tmp/recitation_16k.wav"
         
         # 1. Convert to 16kHz mono 16-bit PCM WAV using ffmpeg
@@ -42,24 +47,34 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 2. Transcribe with word-level timestamps
-        with torch.no_grad():
-            hypotheses = self.model.transcribe([wav_path], return_hypotheses=True)
+        # 2. Transcribe with sherpa-onnx
+        samples, sample_rate = sf.read(wav_path, dtype="float32")
+        stream = self.recognizer.create_stream()
+        stream.accept_waveform(sample_rate=16000, waveform=samples)
+        self.recognizer.decode_stream(stream)
+        result = stream.result
 
-        if not hypotheses:
-            return json.dumps({"words": [], "segments": []})
-
-        hyp = hypotheses[0]
+        # Extract words & timestamps
         words = []
-        if hasattr(hyp, "timestep") and hyp.timestep:
-            for token in hyp.timestep:
-                token_word = getattr(token, "word", str(token)).strip()
-                if token_word:
+        if hasattr(result, "tokens") and hasattr(result, "timestamps") and len(result.tokens) > 0 and len(result.timestamps) > 0:
+            for word, start_time in zip(result.tokens, result.timestamps):
+                w_clean = str(word).replace(" ", " ").strip()
+                if w_clean:
                     words.append({
-                        "word": token_word,
-                        "start": round(float(token.start), 3),
-                        "end": round(float(token.end), 3)
+                        "word": w_clean,
+                        "start": round(float(start_time), 3),
+                        "end": round(float(start_time) + 0.35, 3)
                     })
+        elif getattr(result, "text", None):
+            raw_words = result.text.split()
+            duration = len(samples) / 16000.0
+            step = duration / max(1, len(raw_words))
+            for i, w in enumerate(raw_words):
+                words.append({
+                    "word": w,
+                    "start": round(i * step, 3),
+                    "end": round((i + 1) * step, 3)
+                })
 
         # 3. Group words into video subtitle segments based on natural breath pauses & length limits
         segments = []
@@ -85,7 +100,6 @@ class Predictor(BasePredictor):
                 })
                 current_words = []
 
-        # Cleanup temporary audio file
         if os.path.exists(wav_path):
             os.remove(wav_path)
 
