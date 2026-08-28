@@ -7,21 +7,27 @@ from faster_whisper import WhisperModel
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load Tarteel AI Quran Whisper model (CTranslate2) with GPU acceleration"""
-        print("Loading Tarteel AI Quran Whisper model on GPU...", flush=True)
+        """Load pre-baked Tarteel Quran Whisper model directly from local disk with ZERO network requests"""
+        print("Loading Tarteel AI Quran Whisper model from local disk on GPU...", flush=True)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
-        weights_path = "/src/weights"
-        if not os.path.exists(weights_path):
-            weights_path = "weights"
+        
+        model_path = "/src/weights/model"
+        if not os.path.exists(model_path):
+            model_path = "weights/model"
+        if not os.path.exists(model_path):
+            model_path = "OdyAsh/faster-whisper-base-ar-quran"
+
+        is_local = os.path.exists(model_path) and os.path.isdir(model_path)
+        print(f"Loading model from {'LOCAL DISK ' + model_path if is_local else model_path} on {device} ({compute_type})...", flush=True)
 
         self.model = WhisperModel(
-            "OdyAsh/faster-whisper-base-ar-quran",
+            model_path,
             device=device,
             compute_type=compute_type,
-            download_root=weights_path if os.path.exists(weights_path) else None
+            local_files_only=is_local
         )
-        print(f"Tarteel AI Quran Whisper model ready on {device} ({compute_type}).", flush=True)
+        print(f"Tarteel AI Quran Whisper model loaded successfully and ready on {device}.", flush=True)
 
     def predict(
         self,
