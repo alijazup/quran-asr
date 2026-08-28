@@ -23,26 +23,31 @@ class Predictor(BasePredictor):
         audio: Path = Input(description="Input audio file (WAV, MP3, MP4, etc.)"),
         min_silence_gap: float = Input(
             description="Minimum pause in seconds to split into a new subtitle segment",
-            default=0.45
+            default=0.35
         ),
         max_words_per_segment: int = Input(
             description="Maximum words per subtitle segment",
             default=6
         )
     ) -> str:
-        # Convert to 16kHz mono WAV
+        # Step 1: Convert input audio to pristine 16kHz mono WAV
         wav_path = "/tmp/audio_16k.wav"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(audio),
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Transcribe with Tarteel Quran model using Silero VAD and word-level timestamps
+        # Step 2: Transcribe with Tarteel Quran model with word-level timestamps
         segments_gen, info = self.model.transcribe(
             wav_path,
             language="ar",
             word_timestamps=True,
-            vad_filter=True
+            vad_filter=True,
+            vad_parameters=dict(
+                min_silence_duration_ms=250,
+                speech_pad_ms=200
+            ),
+            temperature=0.0
         )
 
         words = []
@@ -64,9 +69,9 @@ class Predictor(BasePredictor):
                 "arabic_snippet": seg.text.strip()
             })
 
-        print(f"Transcribed {len(words)} words across {len(raw_segments)} segments.")
+        print(f"Transcribed {len(words)} words across {len(raw_segments)} raw segments.")
 
-        # Re-segment words by user preferences if words exist
+        # Step 3: Re-segment words into subtitle-friendly chunks
         final_segments = []
         if words:
             current_words = []
@@ -90,6 +95,13 @@ class Predictor(BasePredictor):
             final_segments = raw_segments
 
         if os.path.exists(wav_path):
-            os.remove(wav_path)
+            try:
+                os.remove(wav_path)
+            except Exception:
+                pass
 
-        return json.dumps({"words": words, "segments": final_segments}, ensure_ascii=False)
+        return json.dumps({
+            "words": words,
+            "segments": final_segments,
+            "status": "success"
+        }, ensure_ascii=False)
