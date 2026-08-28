@@ -3,6 +3,7 @@ import subprocess
 import os
 import json
 import torch
+import numpy as np
 
 class Predictor(BasePredictor):
     def setup(self):
@@ -41,7 +42,6 @@ class Predictor(BasePredictor):
         )
         self.model.eval()
 
-        # Switch hybrid model to CTC decoding (which has the fine-tuned Quran weights)
         try:
             self.model.change_decoding_strategy(decoder_type="ctc")
             print("Switched decoding strategy to CTC.")
@@ -71,51 +71,78 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Transcribe using in-memory model
-        raw_res = self.model.transcribe(paths2audio_files=[wav_path], return_hypotheses=False)
-        text = ""
-        if isinstance(raw_res, list) and len(raw_res) > 0:
-            first = raw_res[0]
-            if isinstance(first, str):
-                text = first
-            elif hasattr(first, "text"):
-                text = str(first.text)
-            elif isinstance(first, list) and len(first) > 0 and hasattr(first[0], "text"):
-                text = str(first[0].text)
-            else:
-                text = str(first)
-        else:
-            text = str(raw_res)
-
-        print(f"Decoded Arabic text: {text}")
-
-        # Filter and clean Arabic words
-        raw_words = [w for w in text.strip().split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
-
-        # Duration & timestamps
         data, samplerate = sf.read(wav_path)
-        duration = len(data) / float(samplerate)
+        total_duration = len(data) / float(samplerate)
 
-        words = []
-        if raw_words:
-            step = duration / max(1, len(raw_words))
-            for i, w in enumerate(raw_words):
-                words.append({
-                    "word": w,
-                    "start": round(i * step, 3),
-                    "end": round((i + 1) * step, 3)
-                })
+        # Chunk audio into <= 25-second windows to respect FastConformer positional window
+        chunk_duration = 25.0
+        chunk_samples = int(chunk_duration * samplerate)
+        all_words = []
+        num_chunks = max(1, int(np.ceil(len(data) / chunk_samples)))
 
+        for c_idx in range(num_chunks):
+            c_start_sample = c_idx * chunk_samples
+            c_end_sample = min((c_idx + 1) * chunk_samples, len(data))
+            chunk_data = data[c_start_sample:c_end_sample]
+            if len(chunk_data) == 0:
+                continue
+
+            chunk_wav_path = f"/tmp/chunk_{c_idx}.wav"
+            sf.write(chunk_wav_path, chunk_data, samplerate)
+
+            chunk_start_time = c_start_sample / float(samplerate)
+            chunk_dur = len(chunk_data) / float(samplerate)
+
+            raw_res = self.model.transcribe(paths2audio_files=[chunk_wav_path], return_hypotheses=False)
+
+            chunk_text = ""
+            if isinstance(raw_res, tuple):
+                # Hybrid model returns (rnnt_list, ctc_list) -> use CTC output (index 1)
+                ctc_part = raw_res[1] if len(raw_res) > 1 else raw_res[0]
+                if isinstance(ctc_part, list) and len(ctc_part) > 0:
+                    chunk_text = ctc_part[0] if isinstance(ctc_part[0], str) else str(getattr(ctc_part[0], 'text', ctc_part[0]))
+                else:
+                    chunk_text = str(ctc_part)
+            elif isinstance(raw_res, list) and len(raw_res) > 0:
+                first = raw_res[0]
+                if isinstance(first, str):
+                    chunk_text = first
+                elif hasattr(first, "text"):
+                    chunk_text = str(first.text)
+                else:
+                    chunk_text = str(first)
+            else:
+                chunk_text = str(raw_res)
+
+            # Clean unknown tokens and special chars
+            chunk_text = chunk_text.replace("⁇", "").replace("['", "").replace("']", "").strip()
+            chunk_words = [w for w in chunk_text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
+
+            print(f"Chunk {c_idx+1}/{num_chunks} text: {chunk_text}")
+
+            if chunk_words:
+                step = chunk_dur / max(1, len(chunk_words))
+                for w_i, w in enumerate(chunk_words):
+                    all_words.append({
+                        "word": w,
+                        "start": round(chunk_start_time + w_i * step, 3),
+                        "end": round(chunk_start_time + (w_i + 1) * step, 3)
+                    })
+
+            if os.path.exists(chunk_wav_path):
+                os.remove(chunk_wav_path)
+
+        # Build subtitle segments
         segments = []
         current_words = []
-        for i, w in enumerate(words):
+        for i, w in enumerate(all_words):
             current_words.append(w)
-            gap_to_next = (words[i + 1]["start"] - w["end"]) if (i + 1 < len(words)) else 999.0
+            gap_to_next = (all_words[i + 1]["start"] - w["end"]) if (i + 1 < len(all_words)) else 999.0
             word_count = len(current_words)
             should_split = (
                 (gap_to_next >= min_silence_gap and word_count >= 2) or
                 (word_count >= max_words_per_segment) or
-                (i == len(words) - 1)
+                (i == len(all_words) - 1)
             )
             if should_split and current_words:
                 segments.append({
@@ -128,4 +155,4 @@ class Predictor(BasePredictor):
         if os.path.exists(wav_path):
             os.remove(wav_path)
 
-        return json.dumps({"words": words, "segments": segments}, ensure_ascii=False)
+        return json.dumps({"words": all_words, "segments": segments}, ensure_ascii=False)
