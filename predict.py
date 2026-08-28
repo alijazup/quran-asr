@@ -4,10 +4,12 @@ import os
 import json
 import torch
 import numpy as np
+import tarfile
+import sentencepiece as spm
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load FastConformer model via native ASRModel.from_pretrained with TDT patch"""
+        """Load FastConformer model and explicitly bind extracted SentencePiece tokenizer"""
         print("Applying NeMo TDT compatibility patch...")
         try:
             import nemo.collections.asr.parts.utils.asr_confidence_utils as asr_confidence_utils
@@ -22,25 +24,55 @@ class Predictor(BasePredictor):
 
         import nemo.collections.asr as nemo_asr
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Loading NightPrince/stt-ar-fastconformer-quran-minshawi on {device}...")
-
         weights_path = "/src/weights/quran_minshawi_final.nemo"
-        if os.path.exists(weights_path):
-            self.model = nemo_asr.models.ASRModel.restore_from(
-                restore_path=weights_path,
-                map_location=device
-            )
-        else:
-            self.model = nemo_asr.models.ASRModel.from_pretrained(
-                "NightPrince/stt-ar-fastconformer-quran-minshawi",
-                map_location=device
-            )
+
+        # 1. Extract SentencePiece tokenizer model directly from archive
+        self.tok_path = "/src/weights/extracted_tok.model"
+        if os.path.exists(weights_path) and not os.path.exists(self.tok_path):
+            try:
+                with tarfile.open(weights_path, "r:*") as tar:
+                    for m in tar.getmembers():
+                        if m.name.endswith(".model") or "tokenizer.model" in m.name:
+                            f = tar.extractfile(m)
+                            if f is not None:
+                                with open(self.tok_path, "wb") as out_f:
+                                    out_f.write(f.read())
+                                print(f"Extracted SentencePiece tokenizer model: {m.name}")
+                                break
+            except Exception as e:
+                print("Tar extraction warning:", e)
+
+        # 2. Load standalone SentencePiece processor for guaranteed decoding
+        self.sp_proc = None
+        if os.path.exists(self.tok_path):
+            try:
+                self.sp_proc = spm.SentencePieceProcessor()
+                self.sp_proc.Load(self.tok_path)
+                print(f"SentencePieceProcessor loaded successfully with {len(self.sp_proc)} tokens.")
+            except Exception as e:
+                print("SentencePiece load warning:", e)
+
+        # 3. Restore NeMo model
+        print(f"Restoring FastConformer model on {device}...")
+        self.model = nemo_asr.models.ASRModel.restore_from(
+            restore_path=weights_path,
+            map_location=device
+        )
         self.model.eval()
-        print("FastConformer model ready.")
+
+        # 4. Attach extracted tokenizer to NeMo model internals
+        if self.sp_proc is not None and hasattr(self.model, "tokenizer"):
+            try:
+                self.model.tokenizer.tokenizer = self.sp_proc
+                print("Bound SentencePieceProcessor to model.tokenizer.tokenizer.")
+            except Exception as e:
+                print("Tokenizer binding warning:", e)
+
+        print("FastConformer Quran ASR model fully initialized and ready.")
 
     def predict(
         self,
-        audio: Path = Input(description="Input audio file (WAV, MP3, MP4,钩 etc.)"),
+        audio: Path = Input(description="Input audio file (WAV, MP3, MP4, etc.)"),
         min_silence_gap: float = Input(
             description="Minimum pause in seconds to split into a new subtitle segment",
             default=0.45
@@ -62,7 +94,7 @@ class Predictor(BasePredictor):
         data, samplerate = sf.read(wav_path)
         total_duration = len(data) / float(samplerate)
 
-        # Chunk audio into <= 25-second windows to respect FastConformer positional window
+        # Chunk audio into <= 25-second windows
         chunk_duration = 25.0
         chunk_samples = int(chunk_duration * samplerate)
         all_words = []
@@ -81,23 +113,40 @@ class Predictor(BasePredictor):
             chunk_start_time = c_start_sample / float(samplerate)
             chunk_dur = len(chunk_data) / float(samplerate)
 
-            raw_res = self.model.transcribe(paths2audio_files=[chunk_wav_path])
-
+            # Transcribe with return_hypotheses=True to get raw token IDs
+            hypotheses = self.model.transcribe(paths2audio_files=[chunk_wav_path], return_hypotheses=True)
+            
             chunk_text = ""
-            if isinstance(raw_res, (list, tuple)) and len(raw_res) > 0:
-                item = raw_res[0]
-                if isinstance(item, (list, tuple)) and len(item) > 0:
-                    chunk_text = str(getattr(item[0], 'text', item[0]))
-                elif hasattr(item, 'text'):
-                    chunk_text = str(item.text)
-                else:
-                    chunk_text = str(item)
-            else:
-                chunk_text = str(raw_res)
+            if hypotheses and len(hypotheses) > 0:
+                hyp = hypotheses[0]
+                if isinstance(hyp, (list, tuple)) and len(hyp) > 0:
+                    hyp = hyp[0]
 
-            print(f"Raw chunk {c_idx+1}/{num_chunks} text: {chunk_text}")
+                # Attempt 1: Direct SentencePiece decoding from y_sequence or token ids
+                if self.sp_proc is not None:
+                    ids = None
+                    if hasattr(hyp, "y_sequence") and hyp.y_sequence is not None:
+                        ids = hyp.y_sequence
+                        if hasattr(ids, "tolist"):
+                            ids = ids.tolist()
+                    elif hasattr(hyp, "tokens") and hyp.tokens is not None:
+                        ids = hyp.tokens
+                        if hasattr(ids, "tolist"):
+                            ids = ids.tolist()
 
-            chunk_words = [w for w in chunk_text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis") and w != "⁇"]
+                    if ids:
+                        clean_ids = [int(x) for x in ids if int(x) > 0 and int(x) < len(self.sp_proc)]
+                        chunk_text = self.sp_proc.decode(clean_ids)
+
+                # Attempt 2: Fallback to hyp.text
+                if not chunk_text and hasattr(hyp, "text") and hyp.text:
+                    chunk_text = str(hyp.text)
+
+            # Final text cleanup
+            chunk_text = chunk_text.replace("⁇", "").replace("['", "").replace("']", "").strip()
+            print(f"Decoded Chunk {c_idx+1}/{num_chunks}: {chunk_text}")
+
+            chunk_words = [w for w in chunk_text.split() if w and not w.startswith("[") and not w.startswith("Hypothesis")]
 
             if chunk_words:
                 step = chunk_dur / max(1, len(chunk_words))
