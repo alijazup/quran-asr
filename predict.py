@@ -1,10 +1,6 @@
 ﻿from cog import BasePredictor, Input, Path
-import onnxruntime as ort
-import sentencepiece as spm
-import numpy as np
-import soundfile as sf
+import nemo.collections.asr as nemo_asr
 import torch
-import torchaudio
 import json
 import subprocess
 import os
@@ -12,21 +8,18 @@ from huggingface_hub import hf_hub_download
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Download and load ONNX FastConformer model and tokenizer once during startup"""
-        print("Downloading ONNX model and tokenizer from HuggingFace...")
-        self.model_path = hf_hub_download(
-            repo_id="Muno459/fastconformer-quran",
-            filename="onnx/model.onnx"
+        """Download and load FastConformer Quran ASR model once during startup"""
+        print("Downloading Quran FastConformer checkpoint from HuggingFace...")
+        model_path = hf_hub_download(
+            repo_id="mohammed/fastconformer-quran-ar",
+            filename="phase3_full_finetune/phase3_full_finetune_wer0.0852.nemo"
         )
-        self.sp_path = hf_hub_download(
-            repo_id="Muno459/fastconformer-quran",
-            filename="tokenizer.model"
-        )
-        self.sp = spm.SentencePieceProcessor(model_file=self.sp_path)
-        
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        self.session = ort.InferenceSession(self.model_path, providers=providers)
-        print("ONNX FastConformer model ready.")
+        print("Restoring NeMo FastConformer model...")
+        self.model = nemo_asr.models.EncDecCTCModelBPE.restore_from(model_path)
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+        self.model.eval()
+        print("FastConformer Quran ASR ready.")
 
     def predict(
         self,
@@ -49,59 +42,38 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # 2. Extract 80-channel log-mel spectrogram features
-        waveform, sample_rate = torchaudio.load(wav_path)
-        mel_transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=16000,
-            n_fft=512,
-            win_length=400,
-            hop_length=160,
-            n_mels=80
-        )
-        mel = mel_transform(waveform)
-        log_mel = torch.log(mel + 1e-5).numpy() # (1, 80, T)
-        length = np.array([log_mel.shape[2]], dtype=np.int64)
+        # 2. Transcribe with word-level timestamps
+        with torch.no_grad():
+            hypotheses = self.model.transcribe([wav_path], return_hypotheses=True)
 
-        # 3. Run ONNX inference
-        outputs = self.session.run(None, {
-            "audio_signal": log_mel,
-            "length": length
-        })
-        logprobs = outputs[0][0] # (T_out, 1025)
+        if not hypotheses:
+            return json.dumps({"words": [], "segments": []})
 
-        # 4. CTC greedy argmax & frame timing mapping
-        best_tokens = np.argmax(logprobs, axis=-1)
-        frame_duration = 0.080 # FastConformer 8x downsampling on 10ms hop
-        blank_id = 1024
-
-        token_timestamps = []
-        prev_token = blank_id
-        
-        for t_idx, token_id in enumerate(best_tokens):
-            if token_id != blank_id and token_id != prev_token:
-                time_sec = t_idx * frame_duration
-                word = self.sp.decode([int(token_id)]).strip()
-                if word:
-                    token_timestamps.append({
-                        "word": word,
-                        "start": round(time_sec, 3),
-                        "end": round(time_sec + frame_duration, 3)
+        hyp = hypotheses[0]
+        words = []
+        if hasattr(hyp, "timestep") and hyp.timestep:
+            for token in hyp.timestep:
+                token_word = getattr(token, "word", str(token)).strip()
+                if token_word:
+                    words.append({
+                        "word": token_word,
+                        "start": round(float(token.start), 3),
+                        "end": round(float(token.end), 3)
                     })
-            prev_token = token_id
 
-        # 5. Group words into video subtitle segments based on natural breath pauses & length limits
+        # 3. Group words into video subtitle segments based on natural breath pauses & length limits
         segments = []
         current_words = []
 
-        for i, w in enumerate(token_timestamps):
+        for i, w in enumerate(words):
             current_words.append(w)
-            gap_to_next = (token_timestamps[i + 1]["start"] - w["end"]) if (i + 1 < len(token_timestamps)) else 999.0
+            gap_to_next = (words[i + 1]["start"] - w["end"]) if (i + 1 < len(words)) else 999.0
             word_count = len(current_words)
 
             should_split = (
                 (gap_to_next >= min_silence_gap and word_count >= 2) or
                 (word_count >= max_words_per_segment) or
-                (i == len(token_timestamps) - 1)
+                (i == len(words) - 1)
             )
 
             if should_split and current_words:
@@ -118,6 +90,6 @@ class Predictor(BasePredictor):
             os.remove(wav_path)
 
         return json.dumps({
-            "words": token_timestamps,
+            "words": words,
             "segments": segments
         }, ensure_ascii=False)

@@ -5,11 +5,10 @@
     - "ffmpeg"
     - "libsndfile1"
   python_version: "3.10"
+  run:
+    - "pip install --no-cache-dir Cython setuptools wheel"
+    - "pip install --no-cache-dir nemo_toolkit[asr]"
   python_packages:
-    - "torch==2.3.1"
-    - "torchaudio==2.3.1"
-    - "onnxruntime-gpu==1.17.0"
-    - "sentencepiece==0.2.0"
     - "soundfile==0.12.1"
     - "numpy==1.26.4"
     - "huggingface_hub>=0.23.0"
