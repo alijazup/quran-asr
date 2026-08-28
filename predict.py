@@ -3,46 +3,27 @@ import subprocess
 import os
 import json
 import torch
-from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
+from faster_whisper import WhisperModel
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load Tarteel AI Quran Whisper model via standard HuggingFace pipeline"""
-        print("Loading Tarteel AI Quran Whisper model with PyTorch GPU...")
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-        model_id = "tarteel-ai/whisper-base-ar-quran"
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            torch_dtype=torch_dtype,
-            low_cpu_mem_usage=True,
-            use_safetensors=True
-        )
-        model.to(device)
-
-        processor = AutoProcessor.from_pretrained(model_id)
-
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            max_new_tokens=256,
-            chunk_length_s=30,
-            batch_size=8,
-            return_timestamps=True,
-            torch_dtype=torch_dtype,
+        """Load official faster-whisper large-v3-turbo model with CTranslate2 GPU acceleration"""
+        print("Loading faster-whisper large-v3-turbo model...")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if device == "cuda" else "int8"
+        self.model = WhisperModel(
+            "large-v3-turbo",
             device=device,
+            compute_type=compute_type
         )
-        print(f"Tarteel AI Quran model successfully loaded on {device}.")
+        print(f"faster-whisper large-v3-turbo ready on {device} ({compute_type}).")
 
     def predict(
         self,
         audio: Path = Input(description="Input audio file (WAV, MP3, MP4, etc.)"),
         min_silence_gap: float = Input(
             description="Minimum pause in seconds to split into a new subtitle segment",
-            default=0.45
+            default=0.35
         ),
         max_words_per_segment: int = Input(
             description="Maximum words per subtitle segment",
@@ -56,59 +37,63 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with Tarteel Quran model
-        result = self.pipe(
+        # Step 2: Transcribe with faster-whisper large-v3-turbo
+        segments_gen, info = self.model.transcribe(
             wav_path,
-            generate_kwargs={
-                "language": "arabic",
-                "task": "transcribe"
-            }
+            language="ar",
+            word_timestamps=True,
+            initial_prompt="بسم الله الرحمن الرحيم. سورة من القرآن الكريم.",
+            vad_filter=True,
+            vad_parameters=dict(
+                min_silence_duration_ms=250,
+                speech_pad_ms=200
+            ),
+            temperature=0.0
         )
 
-        raw_chunks = result.get("chunks", [])
-        raw_text = (result.get("text") or "").strip()
-
         words = []
-        segments = []
+        raw_segments = []
 
-        for chunk in raw_chunks:
-            text = (chunk.get("text") or "").strip()
-            ts = chunk.get("timestamp")
-            if not text or not ts or len(ts) < 2 or ts[0] is None or ts[1] is None:
-                continue
-
-            c_start = float(ts[0])
-            c_end = float(ts[1])
-            chunk_words = text.split()
-            if not chunk_words:
-                continue
-
-            step = (c_end - c_start) / len(chunk_words)
-            for idx, w in enumerate(chunk_words):
-                w_start = round(c_start + idx * step, 3)
-                w_end = round(c_start + (idx + 1) * step, 3)
-                words.append({
-                    "word": w,
-                    "start": w_start,
-                    "end": w_end
-                })
-
-            for w_idx in range(0, len(chunk_words), max_words_per_segment):
-                sub_slice = chunk_words[w_idx:w_idx + max_words_per_segment]
-                sub_start = round(c_start + w_idx * step, 3)
-                sub_end = round(c_start + (w_idx + len(sub_slice)) * step, 3)
-                segments.append({
-                    "start": sub_start,
-                    "end": sub_end,
-                    "arabic_snippet": " ".join(sub_slice)
-                })
-
-        if not segments and raw_text:
-            segments.append({
-                "start": 0.0,
-                "end": 5.0,
-                "arabic_snippet": raw_text
+        for seg in segments_gen:
+            if seg.words:
+                for w in seg.words:
+                    clean_w = w.word.strip()
+                    if clean_w:
+                        words.append({
+                            "word": clean_w,
+                            "start": round(w.start, 3),
+                            "end": round(w.end, 3)
+                        })
+            raw_segments.append({
+                "start": round(seg.start, 3),
+                "end": round(seg.end, 3),
+                "arabic_snippet": seg.text.strip()
             })
+
+        print(f"Transcribed {len(words)} words across {len(raw_segments)} raw segments.")
+
+        # Step 3: Re-segment words into subtitle-friendly chunks
+        final_segments = []
+        if words:
+            current_words = []
+            for i, w in enumerate(words):
+                current_words.append(w)
+                gap_to_next = (words[i + 1]["start"] - w["end"]) if (i + 1 < len(words)) else 999.0
+                word_count = len(current_words)
+                should_split = (
+                    (gap_to_next >= min_silence_gap and word_count >= 2) or
+                    (word_count >= max_words_per_segment) or
+                    (i == len(words) - 1)
+                )
+                if should_split and current_words:
+                    final_segments.append({
+                        "start": round(current_words[0]["start"], 3),
+                        "end": round(current_words[-1]["end"], 3),
+                        "arabic_snippet": " ".join([item["word"] for item in current_words])
+                    })
+                    current_words = []
+        else:
+            final_segments = raw_segments
 
         if os.path.exists(wav_path):
             try:
@@ -117,8 +102,7 @@ class Predictor(BasePredictor):
                 pass
 
         return json.dumps({
-            "raw_text": raw_text,
             "words": words,
-            "segments": segments,
+            "segments": final_segments,
             "status": "success"
         }, ensure_ascii=False)
