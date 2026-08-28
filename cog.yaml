@@ -1,7 +1,6 @@
 image: "r8.im/alijazup/quran-asr"
 build:
-  gpu: true
-  cuda: "11.8"
+  gpu: false
   system_packages:
     - "ffmpeg"
     - "libsndfile1"

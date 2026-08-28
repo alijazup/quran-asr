@@ -7,8 +7,8 @@ import nemo.collections.asr as nemo_asr
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked NVIDIA FastConformer-Quran ASR model (WER 0.0038)"""
-        print("Starting FastConformer-Quran setup...", flush=True)
+        """Load pre-baked NVIDIA FastConformer-Quran ASR model on CPU"""
+        print("Starting FastConformer-Quran CPU setup...", flush=True)
         model_path = "/src/weights/fastconformer-quran.nemo"
         if not os.path.exists(model_path):
             from huggingface_hub import hf_hub_download
@@ -17,23 +17,24 @@ class Predictor(BasePredictor):
                 repo_id="mohammed/fastconformer-quran-ar",
                 filename="phase1_top3/phase1_top3_wer0.0038.nemo"
             )
-        print(f"Loading NeMo model from {model_path}...", flush=True)
+        print(f"Loading NeMo model from {model_path} on CPU...", flush=True)
         
         try:
-            self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(restore_path=model_path)
+            self.model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.restore_from(
+                restore_path=model_path,
+                map_location=torch.device("cpu")
+            )
             self.model.change_decoding_strategy(decoder_type="ctc")
         except Exception as e:
             print(f"Hybrid restore fallback: {e}", flush=True)
-            self.model = nemo_asr.models.EncDecCTCModelBPE.restore_from(restore_path=model_path)
+            self.model = nemo_asr.models.EncDecCTCModelBPE.restore_from(
+                restore_path=model_path,
+                map_location=torch.device("cpu")
+            )
 
-        if torch.cuda.is_available():
-            self.model = self.model.cuda()
-            print("Model loaded on CUDA GPU.", flush=True)
-        else:
-            print("Model loaded on CPU.", flush=True)
-            
+        self.model = self.model.cpu()
         self.model.eval()
-        print("FastConformer-Quran model setup complete and ready.", flush=True)
+        print("FastConformer-Quran CPU model setup complete and ready.", flush=True)
 
     def predict(
         self,
@@ -56,7 +57,7 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", clean_wav
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with FastConformer-Quran
+        # Step 2: Transcribe with FastConformer-Quran on CPU
         with torch.no_grad():
             hypotheses = self.model.transcribe([clean_wav], batch_size=1)
 
