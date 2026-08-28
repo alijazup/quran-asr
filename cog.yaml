@@ -1,14 +1,13 @@
-build:
+﻿build:
   gpu: false
   system_packages:
     - "ffmpeg"
     - "libsndfile1"
   python_version: "3.10"
   python_packages:
-    - "sherpa-onnx"
-    - "onnxruntime==1.18.0"
-    - "sentencepiece==0.2.0"
+    - "torch"
+    - "torchaudio"
+    - "nemo_toolkit[asr]==1.23.0"
     - "soundfile==0.12.1"
-    - "numpy==1.26.4"
     - "huggingface_hub>=0.23.0"
 predict: "predict.py:Predictor"
