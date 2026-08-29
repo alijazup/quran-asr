@@ -41,6 +41,12 @@ class Predictor(BasePredictor):
             local_files_only=os.path.exists(model_path)
         )
 
+        try:
+            self.prompt_ids = processor.get_prompt_ids("بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ")
+        except Exception as e:
+            print(f"Prompt IDs warning: {e}", flush=True)
+            self.prompt_ids = None
+
         self.pipe = pipeline(
             "automatic-speech-recognition",
             model=model,
@@ -54,7 +60,7 @@ class Predictor(BasePredictor):
             torch_dtype=torch_dtype,
             device=device,
         )
-        print(f"Official Tarteel AI model loaded successfully and ready on {device}.", flush=True)
+        print(f"Official Tarteel AI model loaded successfully with prompt_ids on {device}.", flush=True)
 
     def predict(
         self,
@@ -68,23 +74,29 @@ class Predictor(BasePredictor):
             default=6
         )
     ) -> str:
-        # Step 1: Resample input audio to 16kHz mono WAV using ffmpeg
+        # Step 1: Resample input audio to 16kHz mono WAV using ffmpeg with acoustic bandpass filter
         wav_path = "/tmp/audio_16k.wav"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(audio),
-            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
+            "-ar", "16000", "-ac", "1",
+            "-af", "highpass=f=75,lowpass=f=7500",
+            "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with official Tarteel AI pipeline with word-level timestamps
+        # Step 2: Transcribe with official Tarteel AI pipeline with word-level timestamps & Quranic prompt_ids
+        gen_kwargs = {
+            "language": "arabic",
+            "task": "transcribe",
+            "num_beams": 5,
+            "do_sample": False,
+        }
+        if self.prompt_ids is not None:
+            gen_kwargs["prompt_ids"] = self.prompt_ids
+
         result = self.pipe(
             wav_path,
             return_timestamps="word",
-            generate_kwargs={
-                "language": "arabic",
-                "task": "transcribe",
-                "num_beams": 5,
-                "do_sample": False,
-            }
+            generate_kwargs=gen_kwargs
         )
 
         raw_text = (result.get("text", "") or "").strip()
