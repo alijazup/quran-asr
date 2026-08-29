@@ -14,6 +14,6 @@ build:
     - "numpy"
     - "huggingface_hub"
   run:
-    - "mkdir -p /src/weights/model && python3 -c \"import ctranslate2; converter = ctranslate2.converters.TransformersConverter('tarteel-ai/whisper-base-ar-quran'); converter.convert('/src/weights/model', quantization='float16')\""
+    - "mkdir -p /src/weights/model && ct2-transformers-converter --model tarteel-ai/whisper-base-ar-quran --output_dir /src/weights/model --copy_files tokenizer.json preprocessor_config.json --quantization float16"
 predict: "predict.py:Predictor"
 
