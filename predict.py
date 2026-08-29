@@ -48,7 +48,8 @@ class Predictor(BasePredictor):
             feature_extractor=processor.feature_extractor,
             max_new_tokens=256,
             chunk_length_s=30,
-            batch_size=8,
+            stride_length_s=(4, 2),
+            batch_size=1,
             return_timestamps="word",
             torch_dtype=torch_dtype,
             device=device,
@@ -74,11 +75,16 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with official Tarteel AI pipeline
+        # Step 2: Transcribe with official Tarteel AI pipeline with beam search
         result = self.pipe(
             wav_path,
             return_timestamps="word",
-            generate_kwargs={"language": "arabic", "task": "transcribe"}
+            generate_kwargs={
+                "language": "arabic",
+                "task": "transcribe",
+                "num_beams": 5,
+                "do_sample": False
+            }
         )
 
         raw_text = (result.get("text", "") or "").strip()
