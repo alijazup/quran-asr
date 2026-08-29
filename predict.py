@@ -40,6 +40,14 @@ class Predictor(BasePredictor):
             model_path,
             local_files_only=os.path.exists(model_path)
         )
+        self.processor = processor
+
+        try:
+            self.prompt_ids = processor.get_prompt_ids("بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ", return_tensors="pt").to(device)
+            print(f"Quranic prompt_ids successfully initialized: {self.prompt_ids.shape}", flush=True)
+        except Exception as e:
+            print(f"Notice: prompt_ids fallback ({e})", flush=True)
+            self.prompt_ids = None
 
         self.pipe = pipeline(
             "automatic-speech-recognition",
@@ -76,17 +84,20 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with official Tarteel AI pipeline with beam search and Quranic initial prompt
+        # Step 2: Transcribe with official Tarteel AI pipeline with beam search and prompt_ids
+        generate_kwargs = {
+            "language": "arabic",
+            "task": "transcribe",
+            "num_beams": 5,
+            "do_sample": False,
+        }
+        if self.prompt_ids is not None:
+            generate_kwargs["prompt_ids"] = self.prompt_ids
+
         result = self.pipe(
             wav_path,
             return_timestamps="word",
-            generate_kwargs={
-                "language": "arabic",
-                "task": "transcribe",
-                "num_beams": 5,
-                "do_sample": False,
-                "initial_prompt": "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"
-            }
+            generate_kwargs=generate_kwargs
         )
 
         raw_text = (result.get("text", "") or "").strip()
