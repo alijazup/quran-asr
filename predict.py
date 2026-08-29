@@ -42,7 +42,8 @@ class Predictor(BasePredictor):
         )
 
         try:
-            self.prompt_ids = processor.get_prompt_ids("بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ")
+            prompt_tensor = processor.get_prompt_ids("بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ", return_tensors="pt")
+            self.prompt_ids = prompt_tensor.to(device)
         except Exception as e:
             print(f"Prompt IDs warning: {e}", flush=True)
             self.prompt_ids = None
@@ -60,7 +61,7 @@ class Predictor(BasePredictor):
             torch_dtype=torch_dtype,
             device=device,
         )
-        print(f"Official Tarteel AI model loaded successfully with prompt_ids on {device}.", flush=True)
+        print(f"Official Tarteel AI model loaded successfully with tensor prompt_ids on {device}.", flush=True)
 
     def predict(
         self,
