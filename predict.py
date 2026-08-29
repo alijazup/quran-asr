@@ -41,20 +41,13 @@ class Predictor(BasePredictor):
             "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe using faster-whisper with robust Silero VAD filtering
-        vad_params = {
-            "min_silence_duration_ms": 400,
-            "threshold": 0.5,
-            "speech_pad_ms": 200,
-        }
-
+        # Step 2: Transcribe using faster-whisper without VAD clipping
         segments_iter, info = self.model.transcribe(
             wav_path,
             language="ar",
             task="transcribe",
             beam_size=5,
-            vad_filter=True,
-            vad_parameters=vad_params,
+            vad_filter=False,
             word_timestamps=True,
             condition_on_previous_text=False,
         )
