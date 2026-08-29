@@ -71,34 +71,30 @@ class Predictor(BasePredictor):
                         "end": round(w.end, 3),
                     }
                     all_words.append(w_dict)
-                    seg_words.append(w_dict)
+
+        # Build natural subtitle phrases from transcribed words based on acoustic silence gaps
+        current_words = []
+        for i, w in enumerate(all_words):
+            current_words.append(w)
+            gap_to_next = (all_words[i + 1]["start"] - w["end"]) if (i + 1 < len(all_words)) else 999.0
+            count = len(current_words)
             
-            # Each VAD speech segment is a natural breath phrase.
-            # If a single VAD segment exceeds max_words_per_segment, split it gracefully:
-            if seg_words:
-                if len(seg_words) <= max_words_per_segment:
-                    final_segments.append({
-                        "start": seg_words[0]["start"],
-                        "end": seg_words[-1]["end"],
-                        "arabic_snippet": " ".join([x["word"] for x in seg_words])
-                    })
-                else:
-                    chunk = []
-                    for w in seg_words:
-                        chunk.append(w)
-                        if len(chunk) >= max_words_per_segment:
-                            final_segments.append({
-                                "start": chunk[0]["start"],
-                                "end": chunk[-1]["end"],
-                                "arabic_snippet": " ".join([x["word"] for x in chunk])
-                            })
-                            chunk = []
-                    if chunk:
-                        final_segments.append({
-                            "start": chunk[0]["start"],
-                            "end": chunk[-1]["end"],
-                            "arabic_snippet": " ".join([x["word"] for x in chunk])
-                        })
+            # Split when:
+            # 1) Natural breath pause (gap >= min_silence_gap) and we have at least 2 words (or single word before long pause >= 0.8s)
+            # 2) Or phrase reached max_words_per_segment (6 words)
+            # 3) Or last word of the recitation
+            should_split = (
+                (gap_to_next >= min_silence_gap and (count >= 2 or gap_to_next >= 0.8)) or
+                (count >= max_words_per_segment) or
+                (i == len(all_words) - 1)
+            )
+            if should_split and current_words:
+                final_segments.append({
+                    "start": current_words[0]["start"],
+                    "end": current_words[-1]["end"],
+                    "arabic_snippet": " ".join([x["word"] for x in current_words])
+                })
+                current_words = []
 
         if os.path.exists(wav_path):
             try:
