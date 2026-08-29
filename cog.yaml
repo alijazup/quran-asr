@@ -4,19 +4,15 @@ build:
   cuda: "12.1"
   system_packages:
     - "ffmpeg"
-    - "libsndfile1"
   python_version: "3.10"
   python_packages:
     - "torch"
-    - "torchaudio"
     - "transformers"
     - "accelerate"
     - "soundfile"
     - "numpy"
-    - "librosa"
-    - "recitations_segmenter"
     - "huggingface_hub"
   run:
     - "mkdir -p /src/weights/model && python3 -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='tarteel-ai/whisper-base-ar-quran', local_dir='/src/weights/model', local_dir_use_symlinks=False, ignore_patterns=['runs/*'])\""
-    - "mkdir -p /src/weights/segmenter && python3 -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='obadx/recitation-segmenter-v2', local_dir='/src/weights/segmenter', local_dir_use_symlinks=False)\""
+    - "python3 -c \"from transformers import GenerationConfig; gen = GenerationConfig.from_pretrained('openai/whisper-base'); gen.save_pretrained('/src/weights/model')\""
 predict: "predict.py:Predictor"
