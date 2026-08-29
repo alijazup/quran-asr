@@ -73,12 +73,16 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with condition_on_previous_text=False to capture 100% of repetitions (tikrar) and pauses
+        # Step 2: Transcribe with Silero VAD (450ms breath pause split + 250ms speech pad) and verbatim repetition capture
         segments_gen, _ = self.model.transcribe(
             wav_path,
             language="ar",
             word_timestamps=True,
-            vad_filter=False,
+            vad_filter=True,
+            vad_parameters=dict(
+                min_silence_duration_ms=450,
+                speech_pad_ms=250
+            ),
             condition_on_previous_text=False,
             temperature=0.0,
             beam_size=5
