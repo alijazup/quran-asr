@@ -1,58 +1,50 @@
 import os
-
-# Guarantee CUDA 12 and cuDNN dynamic libraries are loaded into LD_LIBRARY_PATH
-try:
-    import nvidia.cublas.lib
-    import nvidia.cudnn.lib
-    cublas_dir = os.path.dirname(nvidia.cublas.lib.__file__)
-    cudnn_dir = os.path.dirname(nvidia.cudnn.lib.__file__)
-    current_ld = os.environ.get("LD_LIBRARY_PATH", "")
-    os.environ["LD_LIBRARY_PATH"] = f"{cublas_dir}:{cudnn_dir}:{current_ld}"
-    import ctypes
-    for f in os.listdir(cublas_dir):
-        if f.endswith(".so.12") or f.endswith(".so"):
-            try:
-                ctypes.CDLL(os.path.join(cublas_dir, f))
-            except Exception:
-                pass
-    for f in os.listdir(cudnn_dir):
-        if f.endswith(".so.9") or f.endswith(".so.8") or f.endswith(".so"):
-            try:
-                ctypes.CDLL(os.path.join(cudnn_dir, f))
-            except Exception:
-                pass
-except Exception:
-    pass
-
-from cog import BasePredictor, Input, Path
 import subprocess
 import json
 import torch
-from faster_whisper import WhisperModel
+from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
+from cog import BasePredictor, Input, Path
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked Tarteel AI Quran Whisper model from local disk"""
-        print("Loading Tarteel AI Quran Whisper (OdyAsh/faster-whisper-base-ar-quran) on GPU...", flush=True)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+        """Load official Tarteel AI Quran Whisper model with native PyTorch GPU acceleration"""
+        print("Loading official Tarteel AI model (tarteel-ai/whisper-base-ar-quran)...", flush=True)
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
         model_path = "/src/weights/model"
         if not os.path.exists(model_path):
             model_path = "weights/model"
         if not os.path.exists(model_path):
-            model_path = "OdyAsh/faster-whisper-base-ar-quran"
+            model_path = "tarteel-ai/whisper-base-ar-quran"
 
-        is_local = os.path.exists(model_path) and os.path.isdir(model_path)
-        print(f"Loading WhisperModel from {'LOCAL DISK ' + model_path if is_local else model_path} on {device} (compute_type=default)...", flush=True)
-
-        self.model = WhisperModel(
+        print(f"Loading model & processor from {model_path} on {device} ({torch_dtype})...", flush=True)
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_path,
-            device=device,
-            compute_type="default",
-            local_files_only=is_local
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            local_files_only=os.path.exists(model_path)
+        )
+        model.to(device)
+
+        processor = AutoProcessor.from_pretrained(
+            model_path,
+            local_files_only=os.path.exists(model_path)
         )
 
-        print(f"Tarteel AI Quran Whisper loaded successfully and ready on {device}.", flush=True)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            max_new_tokens=256,
+            chunk_length_s=30,
+            batch_size=8,
+            return_timestamps="word",
+            torch_dtype=torch_dtype,
+            device=device,
+        )
+        print(f"Official Tarteel AI model loaded successfully and ready on {device}.", flush=True)
 
     def predict(
         self,
@@ -73,41 +65,30 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe using Quran-trained Tarteel AI model
-        segments_gen, _ = self.model.transcribe(
+        # Step 2: Transcribe with official Tarteel AI pipeline
+        result = self.pipe(
             wav_path,
-            language="ar",
-            word_timestamps=True,
-            vad_filter=False,
-            condition_on_previous_text=False,
-            temperature=0.0,
-            beam_size=5
+            return_timestamps="word",
+            generate_kwargs={"language": "arabic", "task": "transcribe"}
         )
 
+        raw_text = (result.get("text", "") or "").strip()
+        chunks = result.get("chunks", []) or []
+
         words = []
-        raw_segments = []
-        full_text_list = []
+        for chunk in chunks:
+            w_text = (chunk.get("text", "") or "").strip()
+            ts = chunk.get("timestamp", (0.0, 0.0))
+            if w_text and ts and len(ts) == 2:
+                start_val = ts[0] if ts[0] is not None else 0.0
+                end_val = ts[1] if ts[1] is not None else start_val + 0.5
+                words.append({
+                    "word": w_text,
+                    "start": round(start_val, 3),
+                    "end": round(end_val, 3)
+                })
 
-        for seg in segments_gen:
-            seg_text = seg.text.strip()
-            if seg_text:
-                full_text_list.append(seg_text)
-            if seg.words:
-                for w in seg.words:
-                    clean_w = w.word.strip()
-                    if clean_w:
-                        words.append({
-                            "word": clean_w,
-                            "start": round(w.start, 3),
-                            "end": round(w.end, 3)
-                        })
-            raw_segments.append({
-                "start": round(seg.start, 3),
-                "end": round(seg.end, 3),
-                "arabic_snippet": seg_text
-            })
-
-        print(f"Tarteel AI transcribed {len(words)} words across {len(raw_segments)} raw segments.", flush=True)
+        print(f"Tarteel AI transcribed {len(words)} words. Raw text: {raw_text[:60]}...", flush=True)
 
         # Step 3: Group words into subtitle-friendly chunks
         final_segments = []
@@ -129,8 +110,12 @@ class Predictor(BasePredictor):
                         "arabic_snippet": " ".join([item["word"] for item in current_words])
                     })
                     current_words = []
-        else:
-            final_segments = raw_segments
+        elif raw_text:
+            final_segments.append({
+                "start": 0.0,
+                "end": 30.0,
+                "arabic_snippet": raw_text
+            })
 
         if os.path.exists(wav_path):
             try:
@@ -138,9 +123,8 @@ class Predictor(BasePredictor):
             except Exception:
                 pass
 
-        full_raw_text = " ".join(full_text_list)
         return json.dumps({
-            "raw_text": full_raw_text,
+            "raw_text": raw_text,
             "words": words,
             "segments": final_segments,
             "status": "success"
