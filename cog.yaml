@@ -14,5 +14,5 @@ build:
     - "nvidia-cublas-cu12"
     - "nvidia-cudnn-cu12"
   run:
-    - "mkdir -p /src/weights/model && python3 -c \"from faster_whisper import download_model; download_model('large-v3-turbo', output_dir='/src/weights/model')\""
+    - "mkdir -p /src/weights/model && python3 -c \"from faster_whisper import download_model; download_model('OdyAsh/faster-whisper-base-ar-quran', output_dir='/src/weights/model')\""
 predict: "predict.py:Predictor"

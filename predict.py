@@ -32,8 +32,8 @@ from faster_whisper import WhisperModel
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load pre-baked faster-whisper large-v3-turbo model from local disk with zero network requests"""
-        print("Loading faster-whisper large-v3-turbo from local disk on GPU...", flush=True)
+        """Load pre-baked Tarteel AI Quran Whisper model from local disk with zero network requests"""
+        print("Loading Tarteel AI Quran Whisper (OdyAsh/faster-whisper-base-ar-quran) from local disk on GPU...", flush=True)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
         
@@ -41,7 +41,7 @@ class Predictor(BasePredictor):
         if not os.path.exists(model_path):
             model_path = "weights/model"
         if not os.path.exists(model_path):
-            model_path = "large-v3-turbo"
+            model_path = "OdyAsh/faster-whisper-base-ar-quran"
 
         is_local = os.path.exists(model_path) and os.path.isdir(model_path)
         print(f"Loading WhisperModel from {'LOCAL DISK ' + model_path if is_local else model_path} on {device} ({compute_type})...", flush=True)
@@ -52,7 +52,7 @@ class Predictor(BasePredictor):
             compute_type=compute_type,
             local_files_only=is_local
         )
-        print(f"Faster-Whisper Large-V3-Turbo loaded successfully and ready on {device}.", flush=True)
+        print(f"Tarteel AI Quran Whisper loaded successfully and ready on {device}.", flush=True)
 
     def predict(
         self,
@@ -73,16 +73,12 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with Silero VAD (450ms breath pause split + 250ms speech pad) and verbatim repetition capture
+        # Step 2: Transcribe using Quran-trained Tarteel AI model
         segments_gen, _ = self.model.transcribe(
             wav_path,
             language="ar",
             word_timestamps=True,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=450,
-                speech_pad_ms=250
-            ),
+            vad_filter=False,
             condition_on_previous_text=False,
             temperature=0.0,
             beam_size=5
@@ -111,7 +107,7 @@ class Predictor(BasePredictor):
                 "arabic_snippet": seg_text
             })
 
-        print(f"Transcribed {len(words)} words across {len(raw_segments)} raw segments.", flush=True)
+        print(f"Tarteel AI transcribed {len(words)} words across {len(raw_segments)} raw segments.", flush=True)
 
         # Step 3: Group words into subtitle-friendly chunks
         final_segments = []
