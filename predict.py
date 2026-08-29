@@ -73,17 +73,14 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with Faster-Whisper Large-V3-Turbo using Silero VAD and word-level timestamps
+        # Step 2: Transcribe with Faster-Whisper Large-V3-Turbo using continuous acoustic decoding (vad_filter=False)
         segments_gen, _ = self.model.transcribe(
             wav_path,
             language="ar",
             word_timestamps=True,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=250,
-                speech_pad_ms=200
-            ),
-            temperature=0.0
+            vad_filter=False,
+            temperature=0.0,
+            beam_size=5
         )
 
         words = []
