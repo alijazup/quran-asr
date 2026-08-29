@@ -33,20 +33,19 @@ class Predictor(BasePredictor):
             default=6
         )
     ) -> str:
-        # Step 1: Resample input audio to 16kHz mono WAV using ffmpeg with acoustic bandpass filter
+        # Step 1: Resample input audio to clean 16kHz mono WAV using ffmpeg
         wav_path = "/tmp/audio_16k.wav"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(audio),
             "-ar", "16000", "-ac", "1",
-            "-af", "highpass=f=75,lowpass=f=7500",
             "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe using faster-whisper with Silero VAD filtering
+        # Step 2: Transcribe using faster-whisper with robust Silero VAD filtering
         vad_params = {
-            "min_silence_duration_ms": 200,
-            "threshold": 0.35,
-            "speech_pad_ms": 30,
+            "min_silence_duration_ms": 400,
+            "threshold": 0.5,
+            "speech_pad_ms": 200,
         }
 
         segments_iter, info = self.model.transcribe(
@@ -57,7 +56,7 @@ class Predictor(BasePredictor):
             vad_filter=True,
             vad_parameters=vad_params,
             word_timestamps=True,
-            initial_prompt="سورة آية بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"
+            condition_on_previous_text=False,
         )
 
         final_segments = []
