@@ -1,149 +1,193 @@
 import os
 import subprocess
 import json
+import time
 import torch
-from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor, GenerationConfig
+import numpy as np
+import soundfile as sf
+from transformers import (
+    AutoModelForAudioFrameClassification,
+    AutoFeatureExtractor,
+    WhisperForConditionalGeneration,
+    WhisperProcessor
+)
+from recitations_segmenter import segment_recitations, clean_speech_intervals
 from cog import BasePredictor, Input, Path
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load official Tarteel AI Quran Whisper model with native PyTorch GPU acceleration"""
-        print("Loading official Tarteel AI model (tarteel-ai/whisper-base-ar-quran)...", flush=True)
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        """Load QuranCaption engine: obadx/recitation-segmenter-v2 + tarteel-ai/whisper-base-ar-quran"""
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
+        # 1. Load Quranic VAD Segmenter (obadx/recitation-segmenter-v2)
+        segmenter_path = "/src/weights/segmenter"
+        if not os.path.exists(segmenter_path):
+            segmenter_path = "weights/segmenter"
+        if not os.path.exists(segmenter_path):
+            segmenter_path = "obadx/recitation-segmenter-v2"
+
+        print(f"Loading Quran VAD Segmenter from {segmenter_path} on {self.device}...", flush=True)
+        self.segmenter_model = AutoModelForAudioFrameClassification.from_pretrained(
+            segmenter_path,
+            local_files_only=os.path.exists(segmenter_path)
+        ).to(self.device, dtype=self.dtype)
+        self.segmenter_model.eval()
+
+        self.segmenter_processor = AutoFeatureExtractor.from_pretrained(
+            segmenter_path,
+            local_files_only=os.path.exists(segmenter_path)
+        )
+
+        # 2. Load Tarteel AI Whisper Model (tarteel-ai/whisper-base-ar-quran)
         model_path = "/src/weights/model"
         if not os.path.exists(model_path):
             model_path = "weights/model"
         if not os.path.exists(model_path):
             model_path = "tarteel-ai/whisper-base-ar-quran"
 
-        print(f"Loading model & processor from {model_path} on {device} ({torch_dtype})...", flush=True)
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        print(f"Loading Tarteel AI Whisper from {model_path} on {self.device}...", flush=True)
+        self.whisper_model = WhisperForConditionalGeneration.from_pretrained(
             model_path,
-            torch_dtype=torch_dtype,
+            torch_dtype=self.dtype,
             low_cpu_mem_usage=True,
             local_files_only=os.path.exists(model_path)
-        )
-        try:
-            gen_cfg_path = os.path.join(model_path, "generation_config.json")
-            if os.path.exists(gen_cfg_path):
-                model.generation_config = GenerationConfig.from_pretrained(model_path)
-            else:
-                model.generation_config = GenerationConfig.from_pretrained("openai/whisper-base")
-        except Exception as e:
-            print(f"GenerationConfig fallback warning: {e}", flush=True)
+        ).to(self.device)
+        self.whisper_model.eval()
 
-        model.to(device)
-
-        processor = AutoProcessor.from_pretrained(
+        self.whisper_processor = WhisperProcessor.from_pretrained(
             model_path,
             local_files_only=os.path.exists(model_path)
         )
-        self.processor = processor
 
-        try:
-            self.prompt_ids = processor.get_prompt_ids("بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ", return_tensors="pt").to(device)
-            print(f"Quranic prompt_ids successfully initialized: {self.prompt_ids.shape}", flush=True)
-        except Exception as e:
-            print(f"Notice: prompt_ids fallback ({e})", flush=True)
-            self.prompt_ids = None
+        # Configure Whisper generation for Quranic Arabic
+        forced_decoder_ids = None
+        for language in ("arabic", "ar"):
+            try:
+                forced_decoder_ids = self.whisper_processor.get_decoder_prompt_ids(
+                    language=language,
+                    task="transcribe"
+                )
+                if forced_decoder_ids:
+                    break
+            except Exception:
+                continue
 
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            max_new_tokens=256,
-            chunk_length_s=30,
-            stride_length_s=(4, 2),
-            batch_size=1,
-            return_timestamps="word",
-            torch_dtype=torch_dtype,
-            device=device,
-        )
-        print(f"Official Tarteel AI model loaded successfully and ready on {device}.", flush=True)
+        self.gen_config = self.whisper_model.generation_config
+        if forced_decoder_ids:
+            self.gen_config.forced_decoder_ids = forced_decoder_ids
+        if hasattr(self.gen_config, "language"):
+            self.gen_config.language = "ar"
+        if hasattr(self.gen_config, "task"):
+            self.gen_config.task = "transcribe"
+
+        print(f"QuranCaption VAD + Tarteel Whisper engine loaded successfully and ready on {self.device}.", flush=True)
 
     def predict(
         self,
         audio: Path = Input(description="Input audio file (WAV, MP3, MP4, MOV, etc.)"),
-        min_silence_gap: float = Input(
-            description="Minimum pause in seconds to split into a new subtitle segment",
-            default=0.40
+        min_silence_ms: int = Input(
+            description="Minimum silence duration in milliseconds to split segments",
+            default=200
         ),
-        max_words_per_segment: int = Input(
-            description="Maximum words per subtitle segment",
-            default=6
+        min_speech_ms: int = Input(
+            description="Minimum speech duration in milliseconds",
+            default=1000
+        ),
+        pad_ms: int = Input(
+            description="Padding in milliseconds before and after each segment",
+            default=50
         )
     ) -> str:
-        # Step 1: Resample input audio to 16kHz mono WAV with acoustic bandpass normalization
+        # Step 1: Resample input audio to 16kHz mono WAV using ffmpeg
         wav_path = "/tmp/audio_16k.wav"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(audio),
-            "-af", "highpass=f=75,lowpass=f=7500",
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with official Tarteel AI pipeline with beam search and prompt_ids
-        generate_kwargs = {
-            "language": "arabic",
-            "task": "transcribe",
-            "num_beams": 5,
-            "do_sample": False,
-        }
-        if self.prompt_ids is not None:
-            generate_kwargs["prompt_ids"] = self.prompt_ids
+        # Read 16kHz audio with soundfile
+        audio_data, sample_rate = sf.read(wav_path)
+        if audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
 
-        result = self.pipe(
-            wav_path,
-            return_timestamps="word",
-            generate_kwargs=generate_kwargs
-        )
+        total_duration = len(audio_data) / 16000.0
+        print(f"Loaded audio: {total_duration:.2f}s", flush=True)
 
-        raw_text = (result.get("text", "") or "").strip()
-        chunks = result.get("chunks", []) or []
+        # Step 2: Detect Quranic speech intervals via obadx/recitation-segmenter-v2
+        t0 = time.time()
+        audio_tensor = torch.from_numpy(audio_data).float()
+        
+        try:
+            outputs = segment_recitations(
+                [audio_tensor],
+                self.segmenter_model,
+                self.segmenter_processor,
+                device=self.device,
+                dtype=self.dtype,
+                batch_size=1
+            )
+            clean_out = clean_speech_intervals(
+                outputs[0].speech_intervals,
+                outputs[0].is_complete,
+                min_silence_duration_ms=min_silence_ms,
+                min_speech_duration_ms=min_speech_ms,
+                pad_duration_ms=pad_ms,
+                return_seconds=True
+            )
+            intervals = clean_out.clean_speech_intervals.tolist()
+        except Exception as e:
+            print(f"VAD segmentation fallback warning: {e}", flush=True)
+            intervals = [[0.0, total_duration]]
 
-        words = []
-        for chunk in chunks:
-            w_text = (chunk.get("text", "") or "").strip()
-            ts = chunk.get("timestamp", (0.0, 0.0))
-            if w_text and ts and len(ts) == 2:
-                start_val = ts[0] if ts[0] is not None else 0.0
-                end_val = ts[1] if ts[1] is not None else start_val + 0.5
-                words.append({
-                    "word": w_text,
-                    "start": round(start_val, 3),
-                    "end": round(end_val, 3)
+        print(f"VAD detected {len(intervals)} Quran recitation intervals in {time.time() - t0:.2f}s", flush=True)
+
+        # Step 3: Transcribe each discrete phrase with Tarteel AI Whisper
+        final_segments = []
+        all_transcribed_texts = []
+
+        for idx, (start_s, end_s) in enumerate(intervals):
+            start_s = max(0.0, round(float(start_s), 3))
+            end_s = min(total_duration, round(float(end_s), 3))
+            if end_s <= start_s:
+                continue
+
+            start_idx = int(start_s * 16000)
+            end_idx = int(end_s * 16000)
+            chunk = audio_data[start_idx:end_idx]
+            if len(chunk) < 1600:  # < 0.1s
+                continue
+
+            feats = self.whisper_processor(
+                audio=chunk,
+                sampling_rate=16000,
+                return_tensors="pt"
+            )["input_features"].to(device=self.device, dtype=self.dtype)
+
+            with torch.no_grad():
+                out_ids = self.whisper_model.generate(
+                    feats,
+                    generation_config=self.gen_config,
+                    max_new_tokens=200,
+                    do_sample=False,
+                    num_beams=1
+                )
+
+            phrase_text = self.whisper_processor.batch_decode(
+                out_ids,
+                skip_special_tokens=True
+            )[0].strip()
+
+            if phrase_text:
+                all_transcribed_texts.append(phrase_text)
+                final_segments.append({
+                    "start": start_s,
+                    "end": end_s,
+                    "arabic_snippet": phrase_text
                 })
 
-        print(f"Tarteel AI transcribed {len(words)} words. Raw text: {raw_text[:60]}...", flush=True)
-
-        # Step 3: Group words into subtitle-friendly chunks
-        final_segments = []
-        if words:
-            current_words = []
-            for i, w in enumerate(words):
-                current_words.append(w)
-                gap_to_next = (words[i + 1]["start"] - w["end"]) if (i + 1 < len(words)) else 999.0
-                word_count = len(current_words)
-                should_split = (
-                    (gap_to_next >= min_silence_gap and word_count >= 2) or
-                    (word_count >= max_words_per_segment) or
-                    (i == len(words) - 1)
-                )
-                if should_split and current_words:
-                    final_segments.append({
-                        "start": round(current_words[0]["start"], 3),
-                        "end": round(current_words[-1]["end"], 3),
-                        "arabic_snippet": " ".join([item["word"] for item in current_words])
-                    })
-                    current_words = []
-        elif raw_text:
-            final_segments.append({
-                "start": 0.0,
-                "end": 30.0,
-                "arabic_snippet": raw_text
-            })
+        raw_text = " ".join(all_transcribed_texts)
+        print(f"Transcription complete: {len(final_segments)} segments generated. Text: {raw_text[:70]}...", flush=True)
 
         if os.path.exists(wav_path):
             try:
@@ -153,7 +197,6 @@ class Predictor(BasePredictor):
 
         return json.dumps({
             "raw_text": raw_text,
-            "words": words,
             "segments": final_segments,
             "status": "success"
         }, ensure_ascii=False)
