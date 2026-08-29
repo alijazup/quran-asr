@@ -14,4 +14,5 @@ build:
     - "huggingface_hub"
   run:
     - "mkdir -p /src/weights/model && python3 -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='tarteel-ai/whisper-base-ar-quran', local_dir='/src/weights/model', local_dir_use_symlinks=False, ignore_patterns=['runs/*'])\""
+    - "python3 -c \"from transformers import GenerationConfig; gen = GenerationConfig.from_pretrained('openai/whisper-base'); gen.save_pretrained('/src/weights/model')\""
 predict: "predict.py:Predictor"

@@ -2,7 +2,7 @@ import os
 import subprocess
 import json
 import torch
-from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
+from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor, GenerationConfig
 from cog import BasePredictor, Input, Path
 
 class Predictor(BasePredictor):
@@ -25,6 +25,15 @@ class Predictor(BasePredictor):
             low_cpu_mem_usage=True,
             local_files_only=os.path.exists(model_path)
         )
+        try:
+            gen_cfg_path = os.path.join(model_path, "generation_config.json")
+            if os.path.exists(gen_cfg_path):
+                model.generation_config = GenerationConfig.from_pretrained(model_path)
+            else:
+                model.generation_config = GenerationConfig.from_pretrained("openai/whisper-base")
+        except Exception as e:
+            print(f"GenerationConfig fallback warning: {e}", flush=True)
+
         model.to(device)
 
         processor = AutoProcessor.from_pretrained(
