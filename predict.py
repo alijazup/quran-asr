@@ -59,7 +59,7 @@ class Predictor(BasePredictor):
         audio: Path = Input(description="Input audio file (WAV, MP3, MP4, MOV, etc.)"),
         min_silence_gap: float = Input(
             description="Minimum pause in seconds to split into a new subtitle segment",
-            default=0.45
+            default=0.40
         ),
         max_words_per_segment: int = Input(
             description="Maximum words per subtitle segment",
@@ -73,12 +73,13 @@ class Predictor(BasePredictor):
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with Faster-Whisper Large-V3-Turbo using continuous acoustic decoding (vad_filter=False)
+        # Step 2: Transcribe with condition_on_previous_text=False to capture 100% of repetitions (tikrar) and pauses
         segments_gen, _ = self.model.transcribe(
             wav_path,
             language="ar",
             word_timestamps=True,
             vad_filter=False,
+            condition_on_previous_text=False,
             temperature=0.0,
             beam_size=5
         )
@@ -108,7 +109,7 @@ class Predictor(BasePredictor):
 
         print(f"Transcribed {len(words)} words across {len(raw_segments)} raw segments.", flush=True)
 
-        # Step 3: Re-segment words into subtitle-friendly chunks
+        # Step 3: Group words into subtitle-friendly chunks
         final_segments = []
         if words:
             current_words = []
