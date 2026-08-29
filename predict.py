@@ -68,14 +68,15 @@ class Predictor(BasePredictor):
             default=6
         )
     ) -> str:
-        # Step 1: Resample input audio to 16kHz mono WAV
+        # Step 1: Resample input audio to 16kHz mono WAV with acoustic bandpass normalization
         wav_path = "/tmp/audio_16k.wav"
         subprocess.run([
             "ffmpeg", "-y", "-i", str(audio),
+            "-af", "highpass=f=75,lowpass=f=7500",
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe with official Tarteel AI pipeline with beam search
+        # Step 2: Transcribe with official Tarteel AI pipeline with beam search and Quranic initial prompt
         result = self.pipe(
             wav_path,
             return_timestamps="word",
@@ -83,7 +84,8 @@ class Predictor(BasePredictor):
                 "language": "arabic",
                 "task": "transcribe",
                 "num_beams": 5,
-                "do_sample": False
+                "do_sample": False,
+                "initial_prompt": "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"
             }
         )
 
