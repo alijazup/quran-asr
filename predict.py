@@ -43,11 +43,10 @@ class Predictor(BasePredictor):
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Step 2: Transcribe using faster-whisper with Silero VAD filtering
-        min_silence_ms = max(250, int(min_silence_gap * 1000))
         vad_params = {
-            "min_silence_duration_ms": min_silence_ms,
-            "threshold": 0.45,
-            "speech_pad_ms": 150,
+            "min_silence_duration_ms": 200,
+            "threshold": 0.35,
+            "speech_pad_ms": 30,
         }
 
         segments_iter, info = self.model.transcribe(
