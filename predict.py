@@ -1,25 +1,65 @@
 import os
 import subprocess
 import json
+import time
+import soundfile as sf
 from faster_whisper import WhisperModel
 from cog import BasePredictor, Input, Path
+from gap_repair import (
+    build_repair_reel,
+    find_voiced_word_gaps,
+    map_reel_words_to_gaps,
+    merge_words,
+)
+
+
+MODEL_REPOSITORY = "deepdml/faster-whisper-large-v3-turbo-ct2"
 
 class Predictor(BasePredictor):
     def setup(self):
-        """Load official Tarteel AI Quran Whisper model with native CTranslate2 GPU acceleration & Silero VAD"""
-        print("Loading official Tarteel AI model with faster-whisper on GPU...", flush=True)
+        """Load the pinned CTranslate2 Whisper weights used by this deployment."""
+        print(f"Loading {MODEL_REPOSITORY} on GPU...", flush=True)
         model_path = "/src/weights/model"
         if not os.path.exists(model_path):
             model_path = "weights/model"
         if not os.path.exists(model_path):
-            model_path = "tarteel-ai/whisper-base-ar-quran"
+            model_path = MODEL_REPOSITORY
 
         self.model = WhisperModel(
             model_path,
             device="cuda",
             compute_type="float16"
         )
-        print("Official Tarteel AI faster-whisper model loaded successfully.", flush=True)
+        print(f"{MODEL_REPOSITORY} loaded successfully.", flush=True)
+
+    def _transcribe(self, audio_source):
+        segments_iter, _ = self.model.transcribe(
+            audio_source,
+            language="ar",
+            task="transcribe",
+            beam_size=5,
+            vad_filter=False,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+        )
+
+        words = []
+        text_parts = []
+        for segment in segments_iter:
+            text = (segment.text or "").strip()
+            if text:
+                text_parts.append(text)
+            for word in (segment.words or []):
+                clean = (word.word or "").strip()
+                if clean:
+                    words.append(
+                        {
+                            "word": clean,
+                            "start": round(float(word.start), 3),
+                            "end": round(float(word.end), 3),
+                        }
+                    )
+        return words, " ".join(text_parts)
 
     def predict(
         self,
@@ -41,36 +81,50 @@ class Predictor(BasePredictor):
             "-c:a", "pcm_s16le", wav_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Step 2: Transcribe using faster-whisper without VAD clipping
-        segments_iter, info = self.model.transcribe(
-            wav_path,
-            language="ar",
-            task="transcribe",
-            beam_size=5,
-            vad_filter=False,
-            word_timestamps=True,
-            condition_on_previous_text=False,
-        )
+        # Step 2: Run the normal full transcription once.
+        initial_decode_started = time.perf_counter()
+        initial_words, initial_raw_text = self._transcribe(wav_path)
+        initial_decode_seconds = time.perf_counter() - initial_decode_started
 
-        final_segments = []
-        all_words = []
-        raw_text_parts = []
+        # Step 3: While the same GPU prediction is still alive, repair only long
+        # timestamp gaps that contain sustained audio energy. This avoids a second
+        # Replicate request/queue and does no extra decoding for clean inputs.
+        detection_started = time.perf_counter()
+        audio_samples, sample_rate = sf.read(wav_path, dtype="float32", always_2d=False)
+        gap_candidates = find_voiced_word_gaps(audio_samples, sample_rate, initial_words)
+        gap_detection_seconds = time.perf_counter() - detection_started
+        recovered_words = []
+        repaired_gaps = []
+        repair_audio_seconds = 0.0
+        repair_decoder_passes = 0
+        repair_decode_seconds = 0.0
 
-        for seg in segments_iter:
-            seg_text = (seg.text or "").strip()
-            if seg_text:
-                raw_text_parts.append(seg_text)
-            
-            seg_words = []
-            for w in (seg.words or []):
-                w_clean = (w.word or "").strip()
-                if w_clean:
-                    w_dict = {
-                        "word": w_clean,
-                        "start": round(w.start, 3),
-                        "end": round(w.end, 3),
+        if gap_candidates:
+            repair_reel, mappings = build_repair_reel(
+                audio_samples, sample_rate, gap_candidates
+            )
+            repair_audio_seconds = len(repair_reel) / float(sample_rate)
+            repair_decoder_passes = 1
+            repair_decode_started = time.perf_counter()
+            reel_words, _ = self._transcribe(repair_reel)
+            repair_decode_seconds = time.perf_counter() - repair_decode_started
+            recovered_by_gap = map_reel_words_to_gaps(reel_words, mappings)
+
+            for index, candidate in enumerate(gap_candidates):
+                kept = recovered_by_gap.get(index, [])
+                recovered_words.extend(kept)
+                repaired_gaps.append(
+                    {
+                        **candidate,
+                        "recovered_word_count": len(kept),
+                        "recovered_text": " ".join(word["word"] for word in kept),
                     }
-                    all_words.append(w_dict)
+                )
+
+        all_words = merge_words(initial_words, recovered_words)
+
+        # Step 4: Build natural subtitle phrases from the complete word stream.
+        final_segments = []
 
         # Build natural subtitle phrases from transcribed words based on acoustic silence gaps
         current_words = []
@@ -102,12 +156,31 @@ class Predictor(BasePredictor):
             except Exception:
                 pass
 
-        raw_text = " ".join(raw_text_parts)
-        print(f"Faster-Whisper transcribed {len(all_words)} words in {len(final_segments)} VAD segments. Text: {raw_text[:60]}...", flush=True)
+        raw_text = " ".join(word["word"] for word in all_words)
+        print(
+            f"Faster-Whisper transcribed {len(initial_words)} initial words, "
+            f"recovered {len(recovered_words)} words from {len(gap_candidates)} voiced gaps, "
+            f"and built {len(final_segments)} subtitle segments. Text: {raw_text[:60]}...",
+            flush=True,
+        )
 
         return json.dumps({
             "raw_text": raw_text,
             "words": all_words,
             "segments": final_segments,
+            "repair": {
+                "strategy": "same-prediction-voiced-gap-redecode",
+                "model": MODEL_REPOSITORY,
+                "initial_word_count": len(initial_words),
+                "initial_raw_text": initial_raw_text,
+                "candidate_gap_count": len(gap_candidates),
+                "recovered_word_count": len(recovered_words),
+                "repair_audio_seconds": round(repair_audio_seconds, 3),
+                "repair_decoder_passes": repair_decoder_passes,
+                "initial_decode_seconds": round(initial_decode_seconds, 3),
+                "gap_detection_seconds": round(gap_detection_seconds, 3),
+                "repair_decode_seconds": round(repair_decode_seconds, 3),
+                "gaps": repaired_gaps,
+            },
             "status": "success"
         }, ensure_ascii=False)
